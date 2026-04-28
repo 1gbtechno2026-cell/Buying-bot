@@ -177,8 +177,8 @@ export class BatchOrchestrator {
         : `Starting batch: ${totalIterations} iterations (${this.config.totalQuantity} total qty, ${this.config.perOrderQuantity} per order)`,
     });
 
-    // Always logout from any previous Flipkart session at the start of a new job
-    // to ensure a clean state, regardless of payment method or login mode
+    // Always logout from any previous session at the start of a new job
+    // to ensure a clean state, regardless of payment method or login mode.
     if (this.platform instanceof FlipkartPlatform) {
       try {
         sendMessage({ type: "log", level: "info", message: "Logging out previous Flipkart session (if any)..." });
@@ -187,6 +187,18 @@ export class BatchOrchestrator {
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
         sendMessage({ type: "log", level: "warn", message: `Logout at job start failed (continuing): ${msg}` });
+      }
+    } else if (this.platform instanceof AmazonPlatform && this.amazonAccounts) {
+      // Only run for Amazon jobs that are using auto-login. If no
+      // amazonAccounts were selected, we don't want to disturb the
+      // user's manual session.
+      try {
+        sendMessage({ type: "log", level: "info", message: "Logging out previous Amazon session (if any)..." });
+        await this.platform.logout();
+        sendMessage({ type: "log", level: "info", message: "Previous Amazon session cleared" });
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        sendMessage({ type: "log", level: "warn", message: `Amazon logout at job start failed (continuing): ${msg}` });
       }
     }
 
