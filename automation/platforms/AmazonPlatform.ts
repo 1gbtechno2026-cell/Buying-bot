@@ -657,6 +657,14 @@ export class AmazonPlatform extends BasePlatform {
   ): Promise<void> {
     console.log(`[Amazon] Logging in as ${email.substring(0, 4)}***`);
 
+    // 0. Sign out of any existing Amazon session first, so we always land on
+    //    the credentials screen with a clean slate (mirrors what Flipkart's
+    //    loginWithEmail does). Skip if we're not currently logged in to save time.
+    if (await this.isLoggedIn()) {
+      console.log("[Amazon] Already signed in — signing out before switching account...");
+      await this.logout();
+    }
+
     // 1. Go to the Amazon sign-in page (the long openid URL the user supplied
     //    — sends us through the standard credential flow).
     await navigateWithRetry(this.page, AMAZON_SIGNIN_URL, {
@@ -860,7 +868,8 @@ export class AmazonPlatform extends BasePlatform {
   }
 
   async logout(): Promise<void> {
-    // Best-effort logout: hitting the sign-out URL clears Amazon's auth cookies.
+    // Hit the Amazon sign-out URL — it both invalidates the session server-side
+    // and redirects back to the homepage in a logged-out state.
     try {
       await this.page.goto("https://www.amazon.in/gp/flex/sign-out.html", {
         waitUntil: "domcontentloaded",
@@ -868,7 +877,62 @@ export class AmazonPlatform extends BasePlatform {
       });
       await sleep(DELAYS.long);
     } catch {
-      // ignore
+      // ignore — fall through to local cookie wipe
+    }
+
+    // Defensive: also delete amazon.in cookies in this page's jar. We scope
+    // strictly to amazon.in so the user's Gmail / other-tab sessions stay
+    // alive (same scoped-cookie pattern Flipkart's logout uses).
+    try {
+      const cookies = await this.page.cookies(
+        "https://www.amazon.in",
+        "https://amazon.in",
+        "https://www.amazon.com",
+      );
+      for (const c of cookies) {
+        await this.page.deleteCookie({ name: c.name, domain: c.domain, path: c.path });
+      }
+      console.log(`[Amazon] Cleared ${cookies.length} amazon.in cookie(s)`);
+    } catch { /* ignore */ }
+
+    try {
+      await this.page.evaluate(() => {
+        try { localStorage.clear(); } catch {}
+        try { sessionStorage.clear(); } catch {}
+      });
+    } catch { /* ignore */ }
+  }
+
+  /**
+   * Detect whether the current Amazon page is showing a logged-in user.
+   * Best-effort — false on any error so the login flow can still proceed.
+   */
+  private async isLoggedIn(): Promise<boolean> {
+    try {
+      // Make sure we're on amazon.in (cheap navigate if not).
+      const url = this.page.url();
+      if (!/amazon\.(in|com)/i.test(url)) {
+        await this.page.goto("https://www.amazon.in", {
+          waitUntil: "domcontentloaded",
+          timeout: 15000,
+        }).catch(() => { /* ignore */ });
+        await sleep(DELAYS.short);
+      }
+      return await this.page.evaluate(() => {
+        const txt = (document.body?.innerText || "").toLowerCase();
+        // Two robust signals: the account-list greeting and the "Your Account" link.
+        if (txt.includes("hello, sign in")) return false;
+        if (txt.includes("hello,") && (txt.includes("account & lists") || txt.includes("returns & orders"))) {
+          return true;
+        }
+        // Fallback: look for the explicit `nav-link-accountList` greeting span.
+        const greeting = document.querySelector(
+          "#nav-link-accountList .nav-line-1, #nav-link-accountList-nav-line-1"
+        );
+        return !!(greeting && !/sign\s*in/i.test(greeting.textContent || ""));
+      });
+    } catch {
+      return false;
     }
   }
 }
