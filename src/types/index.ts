@@ -66,6 +66,7 @@ export interface JobConfig {
   paymentDetails: PaymentDetails;
   cards?: CardDetails[]; // multiple cards for rotation across iterations
   accounts?: string[]; // decrypted Flipkart emails for account rotation
+  amazonAccounts?: { email: string; password: string }[]; // decrypted Amazon credentials for rotation
   address?: AddressDetails; // delivery address with GST for checkout verification
   maxConcurrentTabs?: number; // max simultaneous browser tabs for RTGS multi-tab mode (default: 1)
   giftCardInventoryId?: string; // gift card inventory for code rotation

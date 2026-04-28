@@ -38,12 +38,14 @@ const SEARCH_INPUT_SELECTOR = 'input[name="q"][aria-label="Search mail"]';
 const SETTLE_AFTER_TYPE_MS = 1800;
 const SETTLE_AFTER_ENTER_MS = 3500;
 
+export type GmailOtpSender = "flipkart" | "amazon";
+
 export class GmailOtpService implements InstaDdrServiceLike {
   /** Shorter initial wait than InstaDDR's 60s — Gmail receives mail much faster. */
   readonly initialWaitMs = 10000;
   private inboxReady: Promise<void> | null = null;
 
-  constructor(private page: Page) {
+  constructor(private page: Page, private sender: GmailOtpSender = "flipkart") {
     // Hide navigator.webdriver before any navigation so Google Accounts can't
     // detect automation via the JS flag. The Chrome flags set in
     // BrowserManager suppress most signals; this one belongs to the page.
@@ -104,7 +106,7 @@ export class GmailOtpService implements InstaDdrServiceLike {
     await this.ensureInbox();
 
     // Strategy 1: Flipkart sender + the specific InstaDDR address, last 1h.
-    const specificQuery = `from:flipkart "${email}" newer_than:1h`;
+    const specificQuery = `from:${this.sender} "${email}" newer_than:1h`;
     let otp = await this.searchAndExtract(specificQuery);
     if (otp) {
       console.log(`[Gmail] OTP ${otp} matched via address-specific search`);
@@ -112,7 +114,7 @@ export class GmailOtpService implements InstaDdrServiceLike {
     }
 
     // Strategy 2: newest Flipkart OTP, last 1h.
-    const fallbackQuery = `from:flipkart newer_than:1h`;
+    const fallbackQuery = `from:${this.sender} newer_than:1h`;
     otp = await this.searchAndExtract(fallbackQuery);
     if (otp) {
       console.log(`[Gmail] OTP ${otp} matched via newest-wins fallback`);
@@ -166,7 +168,7 @@ export class GmailOtpService implements InstaDdrServiceLike {
    */
   private async extractOtpFromAutocomplete(): Promise<string | null> {
     try {
-      return await this.page.evaluate(() => {
+      return await this.page.evaluate((sender: string) => {
         const candidates: string[] = [];
 
         // Subject-only nodes (most reliable for OTP-in-subject)
@@ -183,13 +185,13 @@ export class GmailOtpService implements InstaDdrServiceLike {
 
         for (const text of candidates) {
           const lower = text.toLowerCase();
-          if (lower.includes("flipkart") && (lower.includes("verification") || lower.includes("otp"))) {
+          if (lower.includes(sender) && (lower.includes("verification") || lower.includes("otp") || lower.includes("sign-in") || lower.includes("sign in"))) {
             const m = text.match(/\b(\d{6})\b/);
             if (m) return m[1];
           }
         }
         return null;
-      });
+      }, this.sender);
     } catch {
       return null;
     }
@@ -202,47 +204,45 @@ export class GmailOtpService implements InstaDdrServiceLike {
    */
   private async extractOtpFromResults(): Promise<string | null> {
     // 1) Look at row subjects in the result list.
-    const fromRows = await this.page.evaluate(() => {
-      // Gmail subjects in the list are inside `span[data-thread-id] span` or
-      // `tr[role="row"] span[role="link"]`. Be permissive.
+    const fromRows = await this.page.evaluate((sender: string) => {
       const rows = document.querySelectorAll<HTMLElement>('tr[role="row"]');
       for (const row of rows) {
         const text = (row.textContent || "").replace(/\s+/g, " ");
         const lower = text.toLowerCase();
-        if (lower.includes("flipkart") && (lower.includes("verification") || lower.includes("otp"))) {
+        if (lower.includes(sender) && (lower.includes("verification") || lower.includes("otp") || lower.includes("sign-in") || lower.includes("sign in"))) {
           const m = text.match(/\b(\d{6})\b/);
           if (m) return m[1];
         }
       }
       return null;
-    }).catch(() => null);
+    }, this.sender).catch(() => null);
 
     if (fromRows) return fromRows;
 
     // 2) Click the first matching row, then scan the open thread.
-    const opened = await this.page.evaluate(() => {
+    const opened = await this.page.evaluate((sender: string) => {
       const rows = document.querySelectorAll<HTMLElement>('tr[role="row"]');
       for (const row of rows) {
         const lower = (row.textContent || "").toLowerCase();
-        if (lower.includes("flipkart")) {
+        if (lower.includes(sender)) {
           (row.querySelector('span[role="link"], [data-thread-id]') as HTMLElement | null ?? row).click();
           return true;
         }
       }
       return false;
-    }).catch(() => false);
+    }, this.sender).catch(() => false);
 
     if (!opened) return null;
     await sleep(2500);
 
-    return await this.page.evaluate(() => {
+    return await this.page.evaluate((sender: string) => {
       const text = document.body?.innerText || "";
       const lower = text.replace(/\s+/g, " ").toLowerCase();
-      if (!lower.includes("flipkart") || (!lower.includes("verification") && !lower.includes("otp"))) {
+      if (!lower.includes(sender) || (!lower.includes("verification") && !lower.includes("otp") && !lower.includes("sign-in") && !lower.includes("sign in"))) {
         return null;
       }
       const m = text.match(/\b(\d{6})\b/);
       return m ? m[1] : null;
-    }).catch(() => null);
+    }, this.sender).catch(() => null);
   }
 }

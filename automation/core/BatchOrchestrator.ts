@@ -27,6 +27,7 @@ export class BatchOrchestrator {
   private isMultiUrl = false;
   private cards: CardDetails[] | null = null;
   private accounts: string[] | null = null;
+  private amazonAccounts: { email: string; password: string }[] | null = null;
   private giftCardInventoryId: string | null = null;
   private inventoryCodes: InventoryCode[] = [];
   private inventoryIndex = 0;
@@ -64,6 +65,14 @@ export class BatchOrchestrator {
       // Defensive check: account rotation only works for Flipkart
       if (!(this.platform instanceof FlipkartPlatform)) {
         throw new Error("Account rotation is only supported for Flipkart");
+      }
+    }
+
+    // Store Amazon accounts (email + password) for rotation
+    if (config.amazonAccounts && config.amazonAccounts.length > 0) {
+      this.amazonAccounts = config.amazonAccounts;
+      if (!(this.platform instanceof AmazonPlatform)) {
+        throw new Error("Amazon account rotation is only supported for Amazon");
       }
     }
 
@@ -132,11 +141,13 @@ export class BatchOrchestrator {
     const browser = this.page.browser() as Browser;
 
     if (this.config.gmailAddress) {
-      sendMessage({ type: "log", level: "info", message: `Opening Gmail tab for OTP (${this.config.gmailAddress})` });
+      // Pick the correct Gmail sender filter for this job's platform.
+      const sender = this.platform instanceof AmazonPlatform ? "amazon" : "flipkart";
+      sendMessage({ type: "log", level: "info", message: `Opening Gmail tab for OTP (${this.config.gmailAddress}, sender=${sender})` });
       const gmailPage = await browser.newPage();
-      const svc = new GmailOtpService(gmailPage);
-      // Warm up in the background so Gmail is ready by the time Flipkart asks
-      // for the OTP. Errors surface later in fetchOtp.
+      const svc = new GmailOtpService(gmailPage, sender);
+      // Warm up in the background so Gmail is ready by the time the
+      // platform asks for the OTP. Errors surface later in fetchOtp.
       svc.init().catch((err) => {
         sendMessage({ type: "log", level: "warn", message: `[Gmail] warm-up issue: ${(err as Error).message}` });
       });
@@ -200,6 +211,32 @@ export class BatchOrchestrator {
       });
 
       try {
+        // ── Amazon login (separate from Flipkart's email-only flow) ──
+        if (this.amazonAccounts && this.platform instanceof AmazonPlatform) {
+          const idx = i % this.amazonAccounts.length;
+          const { email, password } = this.amazonAccounts[idx];
+          if (!this.otpService) {
+            await this.ensureOtpService();
+          }
+          const instaOptions = this.otpService
+            ? { instaDdrService: this.otpService, instaDdrAccount: { instaDdrId: "", instaDdrPassword: "", email } }
+            : undefined;
+          sendMessage({
+            type: "log",
+            level: "info",
+            message: `Amazon login: account ${idx + 1}/${this.amazonAccounts.length} (${email.substring(0, 4)}***)` +
+              (instaOptions ? " — Gmail will auto-fetch OTP if asked" : " — manual OTP if asked"),
+            iteration: i + 1,
+          });
+          await this.platform.loginWithEmailPassword(email, password, instaOptions);
+          sendMessage({
+            type: "log",
+            level: "info",
+            message: "Amazon login complete",
+            iteration: i + 1,
+          });
+        }
+
         // ── Login block: handle account rotation, InstaDDR, or both ──
         // Determine if login is needed and which email/InstaDDR account to use
         const needsLogin = !!(this.accounts || this.instaDdrAccounts);

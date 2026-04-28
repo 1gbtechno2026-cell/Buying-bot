@@ -92,6 +92,11 @@ export default function NewJobPage() {
   const [useAccountRotation, setUseAccountRotation] = useState(false);
   const [selectedAccountIds, setSelectedAccountIds] = useState<string[]>([]);
 
+  // Amazon account rotation (email + password auto-login)
+  const [savedAmazonAccounts, setSavedAmazonAccounts] = useState<SavedAccount[]>([]);
+  const [useAmazonAccountRotation, setUseAmazonAccountRotation] = useState(false);
+  const [selectedAmazonAccountIds, setSelectedAmazonAccountIds] = useState<string[]>([]);
+
   // InstaDDR OTP automation
   const [useInstaDdr, setUseInstaDdr] = useState(false);
   const [selectedInstaDdrGroupIds, setSelectedInstaDdrGroupIds] = useState<string[]>([]);
@@ -128,8 +133,12 @@ export default function NewJobPage() {
   }
 
   async function fetchSavedAccounts() {
-    const res = await fetch("/api/accounts");
-    if (res.ok) setSavedAccounts(await res.json());
+    const [fk, az] = await Promise.all([
+      fetch("/api/accounts"),
+      fetch("/api/amazon-accounts"),
+    ]);
+    if (fk.ok) setSavedAccounts(await fk.json());
+    if (az.ok) setSavedAmazonAccounts(await az.json());
   }
 
   async function fetchSavedAddresses() {
@@ -237,6 +246,15 @@ export default function NewJobPage() {
       return;
     }
 
+    if (useAmazonAccountRotation && selectedAmazonAccountIds.length === 0) {
+      setError("Select at least one Amazon account, or turn off auto-login");
+      return;
+    }
+    if (useAmazonAccountRotation && platform !== "amazon") {
+      setError("Amazon auto-login is only available when the platform is Amazon");
+      return;
+    }
+
     if (useInstaDdr && selectedInstaDdrGroupIds.length === 0) {
       setError("Select at least one InstaDDR group for auto-OTP");
       return;
@@ -287,6 +305,7 @@ export default function NewJobPage() {
                 ? { giftCardInventoryId: selectedInventoryId }
                 : { paymentDetails: getPaymentDetails() }),
           ...(useAccountRotation ? { accountIds: selectedAccountIds } : {}),
+          ...(useAmazonAccountRotation && platform === "amazon" ? { amazonAccountIds: selectedAmazonAccountIds } : {}),
           ...(useGstAddress && selectedAddressId ? { addressIds: [selectedAddressId], checkoutPincode: checkoutPincode || undefined } : {}),
           ...(paymentMethod === "rtgs" && maxConcurrentTabs > 1 ? { maxConcurrentTabs } : {}),
           ...(useInstaDdr && selectedInstaDdrGroupIds.length > 0 ? { instaDdrAccountIds: selectedInstaDdrGroupIds } : {}),
@@ -523,6 +542,79 @@ export default function NewJobPage() {
               : ` — each ordering the product`
             }
             {intervalSeconds > 0 ? `, ${intervalSeconds}s delay between orders` : ""}
+          </div>
+        )}
+
+        {/* Amazon Auto-Login (Amazon only) */}
+        {platform === "amazon" && (
+          <div className="p-5 bg-gray-900 rounded-xl border border-gray-800">
+            <div className="flex items-center justify-between">
+              <div>
+                <h3 className="text-sm font-semibold text-gray-200">Amazon Auto-Login</h3>
+                <p className="text-xs text-gray-500 mt-0.5">
+                  Bot signs into the chosen Amazon account before each iteration. OTP is auto-fetched from the profile&apos;s linked Gmail when Amazon asks for one.
+                </p>
+              </div>
+              <label className="relative inline-flex items-center cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={useAmazonAccountRotation}
+                  onChange={(e) => {
+                    setUseAmazonAccountRotation(e.target.checked);
+                    if (!e.target.checked) setSelectedAmazonAccountIds([]);
+                  }}
+                  className="sr-only peer"
+                />
+                <div className="w-11 h-6 bg-gray-700 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-0.5 after:left-[2px] after:bg-white after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-orange-600" />
+              </label>
+            </div>
+
+            {useAmazonAccountRotation && (
+              <div className="mt-4 pt-4 border-t border-gray-800 space-y-3">
+                {savedAmazonAccounts.length === 0 ? (
+                  <p className="text-xs text-yellow-400">
+                    No Amazon accounts saved yet.{" "}
+                    <Link href="/dashboard/amazon-accounts" className="underline hover:text-yellow-300">
+                      Add one →
+                    </Link>
+                  </p>
+                ) : (
+                  <>
+                    <p className="text-xs text-gray-500">
+                      Select account(s) — when more than one is selected, the bot rotates across iterations.
+                    </p>
+                    <div className="space-y-2 max-h-48 overflow-y-auto pr-1">
+                      {savedAmazonAccounts.map((acc) => (
+                        <label
+                          key={acc._id}
+                          className="flex items-center gap-3 px-3 py-2 bg-gray-800 rounded-lg border border-gray-700 cursor-pointer hover:bg-gray-700/60"
+                        >
+                          <input
+                            type="checkbox"
+                            checked={selectedAmazonAccountIds.includes(acc._id)}
+                            onChange={() =>
+                              setSelectedAmazonAccountIds((prev) =>
+                                prev.includes(acc._id)
+                                  ? prev.filter((id) => id !== acc._id)
+                                  : [...prev, acc._id]
+                              )
+                            }
+                            className="accent-orange-500"
+                          />
+                          <span className="text-sm text-gray-200">{acc.label}</span>
+                          <span className="text-xs text-gray-500 font-mono ml-auto">{acc.maskedEmail}</span>
+                        </label>
+                      ))}
+                    </div>
+                    {selectedAmazonAccountIds.length > 0 && (
+                      <p className="text-xs text-gray-400">
+                        {selectedAmazonAccountIds.length} account{selectedAmazonAccountIds.length !== 1 ? "s" : ""} selected
+                      </p>
+                    )}
+                  </>
+                )}
+              </div>
+            )}
           </div>
         )}
 

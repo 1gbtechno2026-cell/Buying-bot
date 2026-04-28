@@ -1,11 +1,14 @@
 import { Page } from "puppeteer-core";
-import { BasePlatform, OrderDetails } from "./BasePlatform";
+import { BasePlatform, OrderDetails, InstaDdrLoginOptions } from "./BasePlatform";
 import {
   sleep,
   navigateWithRetry,
   waitWithRetry,
   waitAndClick,
 } from "../core/helpers";
+
+const AMAZON_SIGNIN_URL =
+  "https://www.amazon.in/ap/signin?openid.return_to=https%3A%2F%2Fwww.amazon.in%2Fref%3Dnav_ya_signin&openid.identity=http%3A%2F%2Fspecs.openid.net%2Fauth%2F2.0%2Fidentifier_select&openid.assoc_handle=inflex&openid.mode=checkid_setup&openid.claimed_id=http%3A%2F%2Fspecs.openid.net%2Fauth%2F2.0%2Fidentifier_select&openid.ns=http%3A%2F%2Fspecs.openid.net%2Fauth%2F2.0";
 
 const DELAYS = {
   short: 500,
@@ -643,5 +646,229 @@ export class AmazonPlatform extends BasePlatform {
     }
 
     console.log("Browser state reset complete");
+  }
+
+  // ─── Login flow (email + password, optional OTP) ───────────────────────
+
+  async loginWithEmailPassword(
+    email: string,
+    password: string,
+    options?: InstaDdrLoginOptions,
+  ): Promise<void> {
+    console.log(`[Amazon] Logging in as ${email.substring(0, 4)}***`);
+
+    // 1. Go to the Amazon sign-in page (the long openid URL the user supplied
+    //    — sends us through the standard credential flow).
+    await navigateWithRetry(this.page, AMAZON_SIGNIN_URL, {
+      timeoutMs: 20000,
+      maxRetries: 3,
+    });
+    await sleep(DELAYS.medium);
+
+    // 2. Email / phone input → type → Continue
+    await waitWithRetry(
+      this.page,
+      async () => {
+        await this.page.waitForSelector("#ap_email_login, input[name='email']", { timeout: 10000, visible: true });
+      },
+      { label: "Amazon email input", timeoutMs: 10000, maxRetries: 5 },
+    );
+    const emailSel = (await this.page.$("#ap_email_login")) ? "#ap_email_login" : "input[name='email']";
+    await this.page.click(emailSel, { clickCount: 3 });
+    await this.page.keyboard.press("Backspace");
+    await this.page.type(emailSel, email, { delay: 30 });
+    await sleep(DELAYS.short);
+
+    // Continue button — primary selector by aria-labelledby; fall back to id
+    const continueClicked = await this.page.evaluate(() => {
+      const sel =
+        document.querySelector('input.a-button-input[aria-labelledby="continue-announce"]') ||
+        document.querySelector("#continue") ||
+        document.querySelector('input[type="submit"][aria-labelledby*="continue"]');
+      if (sel) {
+        (sel as HTMLElement).click();
+        return true;
+      }
+      return false;
+    });
+    if (!continueClicked) {
+      throw new Error("Amazon: Continue button not found after entering email");
+    }
+    await sleep(DELAYS.medium);
+
+    // 3. Password input → type → Sign-In
+    await waitWithRetry(
+      this.page,
+      async () => {
+        await this.page.waitForSelector("#ap_password, input[name='password']", { timeout: 15000, visible: true });
+      },
+      { label: "Amazon password input", timeoutMs: 15000, maxRetries: 5 },
+    );
+    const passSel = (await this.page.$("#ap_password")) ? "#ap_password" : "input[name='password']";
+    await this.page.click(passSel, { clickCount: 3 });
+    await this.page.keyboard.press("Backspace");
+    await this.page.type(passSel, password, { delay: 30 });
+    await sleep(DELAYS.short);
+
+    const signInClicked = await this.page.evaluate(() => {
+      const sel =
+        document.querySelector("#signInSubmit") ||
+        document.querySelector('input[type="submit"][aria-labelledby*="signin"]');
+      if (sel) {
+        (sel as HTMLElement).click();
+        return true;
+      }
+      return false;
+    });
+    if (!signInClicked) {
+      throw new Error("Amazon: Sign-In button not found after entering password");
+    }
+    await sleep(2500);
+
+    // 4. Conditional OTP step — Amazon may or may not challenge for an OTP
+    //    after sign-in. Wait briefly; if an OTP input shows up, fetch & enter
+    //    it; otherwise assume sign-in completed and move on.
+    const otpDetected = await this.detectOtpStep(8000);
+    if (otpDetected) {
+      console.log("[Amazon] OTP step detected — attempting to fetch & enter");
+      const otpInput = otpDetected.selector;
+      const otp = await this.fetchAmazonOtp(email, options);
+      if (!otp) {
+        // No service available — let the user enter manually.
+        console.log("[Amazon] No OTP service configured — waiting up to 5 min for human entry");
+        const ok = await this.waitForLoginCompletion(300000);
+        if (!ok) throw new Error("Amazon: login did not complete after manual OTP entry");
+        return;
+      }
+      await this.page.click(otpInput, { clickCount: 3 });
+      await this.page.keyboard.press("Backspace");
+      await this.page.type(otpInput, otp, { delay: 30 });
+      await sleep(DELAYS.short);
+
+      // Submit OTP — Amazon's OTP submit is usually `#auth-signin-button` or
+      // an input with aria-labelledby that includes "signin"/"verify".
+      await this.page.evaluate(() => {
+        const sel =
+          document.querySelector("#auth-signin-button") ||
+          document.querySelector('input[type="submit"][aria-labelledby*="signin"]') ||
+          document.querySelector('input[type="submit"][aria-labelledby*="verify"]') ||
+          document.querySelector("#cvf-submit-otp-button input") ||
+          document.querySelector('form input[type="submit"]');
+        if (sel) (sel as HTMLElement).click();
+      });
+      await sleep(DELAYS.long);
+    } else {
+      console.log("[Amazon] No OTP challenge — proceeding directly to logged-in state");
+    }
+
+    const ok = await this.waitForLoginCompletion(60000);
+    if (!ok) {
+      throw new Error("Amazon: login did not complete (still on sign-in page after OTP)");
+    }
+    console.log("[Amazon] Login complete");
+  }
+
+  /**
+   * Detect whether Amazon's post-password screen is asking for an OTP.
+   * Returns the selector to type into (and `true`) or null if no OTP needed.
+   */
+  private async detectOtpStep(timeoutMs: number): Promise<{ selector: string } | null> {
+    const deadline = Date.now() + timeoutMs;
+    const selectors = [
+      "#auth-mfa-otpcode",
+      "input[name='otpCode']",
+      "input[name='code']",
+      "#cvf-input-code",
+      "input[autocomplete='one-time-code']",
+      "input[name='cvf-input-code']",
+    ];
+    while (Date.now() < deadline) {
+      for (const sel of selectors) {
+        try {
+          const found = await this.page.$(sel);
+          if (found) {
+            const visible = await this.page.evaluate((s) => {
+              const el = document.querySelector(s) as HTMLElement | null;
+              if (!el) return false;
+              const r = el.getBoundingClientRect();
+              return r.width > 0 && r.height > 0;
+            }, sel);
+            if (visible) return { selector: sel };
+          }
+        } catch { /* ignore */ }
+      }
+      // If we already left the sign-in page, no OTP is going to appear.
+      try {
+        const url = this.page.url();
+        if (!/\/ap\/(signin|mfa|cvf)/.test(url)) return null;
+      } catch { /* ignore */ }
+      await sleep(500);
+    }
+    return null;
+  }
+
+  private async fetchAmazonOtp(
+    email: string,
+    options?: InstaDdrLoginOptions,
+  ): Promise<string | null> {
+    if (!options?.instaDdrService) return null;
+    const svc = options.instaDdrService;
+    const credentials = options.instaDdrAccount ?? {
+      instaDdrId: "",
+      instaDdrPassword: "",
+      email,
+    };
+
+    // Wait a bit for the OTP email to actually arrive.
+    const initialWait = svc.initialWaitMs ?? 10000;
+    console.log(`[Amazon] Waiting ${Math.round(initialWait / 1000)}s for OTP email...`);
+    await sleep(initialWait);
+
+    // Retry loop — Amazon emails arrive within ~10s but can lag.
+    const MAX_ATTEMPTS = 24;
+    for (let i = 1; i <= MAX_ATTEMPTS; i++) {
+      try {
+        const otp = await svc.fetchOtp(credentials);
+        if (otp) {
+          console.log(`[Amazon] OTP fetched: ${otp}`);
+          return otp;
+        }
+      } catch (err) {
+        console.log(`[Amazon] OTP fetch attempt ${i}/${MAX_ATTEMPTS} failed: ${err instanceof Error ? err.message : err}`);
+      }
+      if (i < MAX_ATTEMPTS) await sleep(5000);
+    }
+    return null;
+  }
+
+  async waitForLoginCompletion(timeoutMs = 60000): Promise<boolean> {
+    const deadline = Date.now() + timeoutMs;
+    while (Date.now() < deadline) {
+      try {
+        const loggedIn = await this.page.evaluate(() => {
+          const url = window.location.href.toLowerCase();
+          // Off the sign-in / MFA / CVF screens means we're in.
+          if (/\/ap\/(signin|mfa|cvf)/.test(url)) return false;
+          const text = (document.body?.innerText || "").toLowerCase();
+          return text.includes("hello") || text.includes("your account") || text.includes("returns & orders");
+        });
+        if (loggedIn) return true;
+      } catch { /* navigation in flight */ }
+      await sleep(2000);
+    }
+    return false;
+  }
+
+  async logout(): Promise<void> {
+    // Best-effort logout: hitting the sign-out URL clears Amazon's auth cookies.
+    try {
+      await this.page.goto("https://www.amazon.in/gp/flex/sign-out.html", {
+        waitUntil: "domcontentloaded",
+        timeout: 15000,
+      });
+      await sleep(DELAYS.long);
+    } catch {
+      // ignore
+    }
   }
 }
