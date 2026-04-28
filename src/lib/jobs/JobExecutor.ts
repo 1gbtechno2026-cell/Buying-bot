@@ -4,6 +4,7 @@ import dbConnect from "@/lib/db/connect";
 import Job from "@/lib/db/models/Job";
 import SavedCard from "@/lib/db/models/SavedCard";
 import FlipkartAccount from "@/lib/db/models/FlipkartAccount";
+import AmazonAccount from "@/lib/db/models/AmazonAccount";
 import SavedAddress from "@/lib/db/models/SavedAddress";
 import Log from "@/lib/db/models/Log";
 import InstaDdrAccount from "@/lib/db/models/InstaDdrAccount";
@@ -89,6 +90,27 @@ export class JobExecutor extends EventEmitter {
           }
         })
         .filter((a): a is string => a !== null);
+    }
+
+    // Decrypt Amazon accounts (email + password) for rotation
+    let amazonAccounts: { email: string; password: string }[] | undefined;
+    const amazonAccountIds = (job as unknown as { amazonAccountIds?: string[] }).amazonAccountIds as string[] | undefined;
+    if (amazonAccountIds && amazonAccountIds.length > 0) {
+      const savedAmazonAccounts = await AmazonAccount.find({ _id: { $in: amazonAccountIds } });
+      amazonAccounts = savedAmazonAccounts
+        .map((aa: { _id: unknown; encryptedEmail: string; encryptedPassword: string }) => {
+          try {
+            return {
+              email: decrypt(aa.encryptedEmail),
+              password: decrypt(aa.encryptedPassword),
+            };
+          } catch {
+            console.warn(`[Job ${this.jobId}] Skipping corrupt Amazon account ${aa._id}`);
+            return null;
+          }
+        })
+        .filter((a): a is { email: string; password: string } => a !== null);
+      console.log(`[Job ${this.jobId}] Loaded ${amazonAccounts.length} Amazon account(s) for rotation`);
     }
 
     // Decrypt InstaDDR accounts for OTP automation
@@ -200,6 +222,7 @@ export class JobExecutor extends EventEmitter {
       paymentDetails: typedPaymentDetails,
       ...(cards && cards.length > 0 ? { cards } : {}),
       ...(accounts && accounts.length > 0 ? { accounts } : {}),
+      ...(amazonAccounts && amazonAccounts.length > 0 ? { amazonAccounts } : {}),
       ...(address ? { address } : {}),
       ...(job.maxConcurrentTabs > 1 ? { maxConcurrentTabs: job.maxConcurrentTabs } : {}),
       ...(instaDdrAccounts && instaDdrAccounts.length > 0 ? { instaDdrAccounts } : {}),

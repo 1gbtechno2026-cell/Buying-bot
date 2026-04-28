@@ -29,6 +29,7 @@ const createJobSchema = z.object({
   paymentDetails: z.record(z.string(), z.string()).optional(),
   cardIds: z.array(z.string()).optional(),
   accountIds: z.array(z.string()).optional(),
+  amazonAccountIds: z.array(z.string()).optional(),
   addressIds: z.array(z.string()).optional(),
   checkoutPincode: z.string().optional(),
   maxConcurrentTabs: z.number().int().positive().optional(),
@@ -166,6 +167,28 @@ export async function POST(req: NextRequest) {
       }
     }
 
+    // Validate Amazon account rotation: amazonAccountIds → must be Amazon platform.
+    const useAmazonAccountRotation = data.amazonAccountIds && data.amazonAccountIds.length > 0;
+    if (useAmazonAccountRotation) {
+      if (data.platform !== "amazon") {
+        return NextResponse.json(
+          { error: "Amazon account rotation is only supported for Amazon jobs" },
+          { status: 400 }
+        );
+      }
+      const { default: AmazonAccount } = await import("@/lib/db/models/AmazonAccount");
+      const userAmazonAccounts = await AmazonAccount.find({
+        _id: { $in: data.amazonAccountIds },
+        userId,
+      }).select("_id");
+      if (userAmazonAccounts.length !== data.amazonAccountIds!.length) {
+        return NextResponse.json(
+          { error: "One or more selected Amazon accounts not found" },
+          { status: 400 }
+        );
+      }
+    }
+
     // Validate addressIds: if provided, verify they belong to user and platform is flipkart
     // For Flipkart jobs: if addressIds is not explicitly provided (undefined), auto-populate
     // the first saved address so GST verification always works if addresses exist.
@@ -282,6 +305,7 @@ export async function POST(req: NextRequest) {
         : "",
       cardIds: useCardRotation ? data.cardIds : [],
       accountIds: useAccountRotation ? data.accountIds : [],
+      amazonAccountIds: useAmazonAccountRotation ? data.amazonAccountIds : [],
       addressIds: addressIdsToStore,
       checkoutPincode: data.checkoutPincode || "",
       maxConcurrentTabs: data.maxConcurrentTabs || 1,

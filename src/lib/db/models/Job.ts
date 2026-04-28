@@ -18,6 +18,7 @@ export interface IJob extends Document {
   paymentDetails: string; // AES-256-GCM encrypted JSON
   cardIds: mongoose.Types.ObjectId[]; // saved cards for rotation
   accountIds: mongoose.Types.ObjectId[]; // Flipkart accounts for rotation
+  amazonAccountIds: mongoose.Types.ObjectId[]; // Amazon accounts for rotation
   addressIds: mongoose.Types.ObjectId[]; // saved addresses for GST address verification
   giftCardInventoryId?: mongoose.Types.ObjectId;
   instaDdrAccountIds?: mongoose.Types.ObjectId[]; // InstaDDR account groups for OTP automation
@@ -99,6 +100,10 @@ const JobSchema = new Schema<IJob>(
     },
     accountIds: {
       type: [{ type: Schema.Types.ObjectId, ref: "FlipkartAccount" }],
+      default: [],
+    },
+    amazonAccountIds: {
+      type: [{ type: Schema.Types.ObjectId, ref: "AmazonAccount" }],
       default: [],
     },
     addressIds: {

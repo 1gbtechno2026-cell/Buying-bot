@@ -97,6 +97,21 @@ export abstract class BasePlatform {
     throw new Error("loginWithEmail not implemented for this platform");
   }
 
+  /**
+   * Login with email + password (used by Amazon). After password entry the
+   * site may or may not ask for an OTP — implementations should wait briefly
+   * and skip OTP entry if it doesn't appear. If `options.instaDdrService` is
+   * provided, OTP is auto-fetched (typically from Gmail); otherwise the user
+   * is expected to enter it manually.
+   */
+  async loginWithEmailPassword(
+    _email: string,
+    _password: string,
+    _options?: InstaDdrLoginOptions,
+  ): Promise<void> {
+    throw new Error("loginWithEmailPassword not implemented for this platform");
+  }
+
   /** Wait for login to complete after OTP entry */
   async waitForLoginCompletion(_timeoutMs?: number): Promise<boolean> {
     throw new Error("waitForLoginCompletion not implemented for this platform");
