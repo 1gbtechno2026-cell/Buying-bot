@@ -28,6 +28,7 @@ export default function ProfilesPage() {
   const [gmailLoading, setGmailLoading] = useState<string | null>(null);
   const [gmailModalFor, setGmailModalFor] = useState<string | null>(null);
   const [gmailInput, setGmailInput] = useState("");
+  const [liveUrl, setLiveUrl] = useState<{ url: string; reason: string } | null>(null);
 
   useEffect(() => {
     if (status === "unauthenticated") router.push("/login");
@@ -68,11 +69,9 @@ export default function ProfilesPage() {
     if (res.ok) {
       const data = await res.json().catch(() => ({}));
       if (data.noVncUrl) {
-        // Open the live view in a new tab so the user can watch + interact.
-        window.open(data.noVncUrl, "_blank", "noopener,noreferrer");
-        alert(`Chrome launched. A new tab should have opened at:\n${data.noVncUrl}\n\nLog in manually, then close the Chrome window.`);
+        setLiveUrl({ url: data.noVncUrl, reason: "Chrome launched for profile setup" });
       } else {
-        alert("Chrome launched! Log in manually, then close the browser.");
+        alert("Chrome launched on the server display. Log in manually, then close the browser.");
       }
       fetchProfiles();
     } else {
@@ -104,8 +103,7 @@ export default function ProfilesPage() {
     const data = await res.json().catch(() => ({}));
     if (res.ok) {
       if (data.noVncUrl) {
-        window.open(data.noVncUrl, "_blank", "noopener,noreferrer");
-        alert(`Gmail address saved.\nLive view: ${data.noVncUrl}\nLog in to Gmail in the new tab, then close that Chrome window.`);
+        setLiveUrl({ url: data.noVncUrl, reason: `Gmail address saved — log in to Gmail in the live viewer` });
       } else {
         alert("Gmail address saved. Chrome is open — log in, then close the browser.");
       }
@@ -152,6 +150,31 @@ export default function ProfilesPage() {
           {showCreate ? "Cancel" : "+ New Profile"}
         </button>
       </div>
+
+      {/* Live-viewer button (shown after profile setup / Gmail connect) */}
+      {liveUrl && (
+        <div className="mb-6 p-3 bg-indigo-600/20 border border-indigo-500/40 rounded-xl text-indigo-200 text-sm flex items-center justify-between gap-4">
+          <span>
+            ▶ {liveUrl.reason}
+          </span>
+          <div className="flex items-center gap-2">
+            <a
+              href={liveUrl.url}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="px-3 py-1 bg-indigo-600 hover:bg-indigo-500 text-white rounded-lg text-xs font-medium"
+            >
+              Open live viewer
+            </a>
+            <button
+              onClick={() => setLiveUrl(null)}
+              className="px-2 py-1 text-indigo-300 hover:text-indigo-100 text-xs"
+            >
+              ✕
+            </button>
+          </div>
+        </div>
+      )}
 
       {/* Create Form */}
       {showCreate && (

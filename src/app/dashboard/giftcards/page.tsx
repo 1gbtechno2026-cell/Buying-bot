@@ -56,6 +56,7 @@ export default function GiftCardsPage() {
   const [error, setError] = useState("");
   const [success, setSuccess] = useState("");
   const [logs, setLogs] = useState<string[]>([]);
+  const [liveUrl, setLiveUrl] = useState<string | null>(null);
   const [history, setHistory] = useState<HistoryEntry[]>([]);
   const [historyLoading, setHistoryLoading] = useState(true);
   const eventSourceRef = useRef<EventSource | null>(null);
@@ -330,10 +331,9 @@ export default function GiftCardsPage() {
         return;
       }
 
+      setLiveUrl(data.noVncUrl ?? null);
       if (data.noVncUrl) {
-        setSuccess(`Job started — watch live: ${data.noVncUrl}`);
-        // Pop the live viewer so the user doesn't have to copy the URL.
-        window.open(data.noVncUrl, "_blank", "noopener,noreferrer");
+        setSuccess(`Job started. Click the "Open live viewer" button to watch it.`);
       }
       subscribeToJob(data.jobId);
     } catch {
@@ -542,6 +542,21 @@ export default function GiftCardsPage() {
           <span className="shrink-0 mt-0.5">&#x2713;</span>
           <span>{success}</span>
         </div>
+      )}
+
+      {liveUrl && (
+        <a
+          href={liveUrl}
+          target="_blank"
+          rel="noopener noreferrer"
+          className="mb-4 flex items-center justify-between p-3 bg-indigo-600/20 border border-indigo-500/40 rounded-xl text-indigo-200 text-sm hover:bg-indigo-600/30 transition-colors"
+        >
+          <span className="flex items-center gap-2">
+            <span>▶</span>
+            <span>Open live viewer for this run</span>
+          </span>
+          <span className="font-mono text-xs text-indigo-400">{liveUrl}</span>
+        </a>
       )}
 
       {activeTab === "add" ? (

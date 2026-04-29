@@ -66,6 +66,7 @@ export default function VerifyGiftCardsPage() {
   const eventSourceRef = useRef<EventSource | null>(null);
   const [activeJobId, setActiveJobId] = useState<string | null>(null);
   const [resumedNotice, setResumedNotice] = useState<string | null>(null);
+  const [liveUrl, setLiveUrl] = useState<string | null>(null);
 
   // Tabs + history
   const [activeTab, setActiveTab] = useState<"verify" | "history">("verify");
@@ -333,9 +334,9 @@ export default function VerifyGiftCardsPage() {
 
       setActiveJobId(data.jobId);
       setResumedNotice(null);
+      setLiveUrl(data.noVncUrl ?? null);
       if (data.noVncUrl) {
-        setSuccess(`Job started — watch live: ${data.noVncUrl}`);
-        window.open(data.noVncUrl, "_blank", "noopener,noreferrer");
+        setSuccess(`Job started. Click the "Open live viewer" button to watch it.`);
       }
       subscribeToJob(data.jobId);
       refreshHistory();
@@ -464,6 +465,22 @@ export default function VerifyGiftCardsPage() {
           <span className="shrink-0 mt-0.5">↻</span>
           <span>{resumedNotice}</span>
         </div>
+      )}
+
+      {/* Live-viewer button (shown when this run got a noVncUrl back) */}
+      {liveUrl && (
+        <a
+          href={liveUrl}
+          target="_blank"
+          rel="noopener noreferrer"
+          className="mb-4 flex items-center justify-between p-3 bg-indigo-600/20 border border-indigo-500/40 rounded-xl text-indigo-200 text-sm hover:bg-indigo-600/30 transition-colors"
+        >
+          <span className="flex items-center gap-2">
+            <span>▶</span>
+            <span>Open live viewer for this run</span>
+          </span>
+          <span className="font-mono text-xs text-indigo-400">{liveUrl}</span>
+        </a>
       )}
 
       {/* Alerts */}
