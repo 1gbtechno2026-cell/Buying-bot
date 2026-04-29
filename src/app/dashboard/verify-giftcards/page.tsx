@@ -93,8 +93,12 @@ export default function VerifyGiftCardsPage() {
     };
   }, []);
 
-  // On mount: load history; if a verify job is still pending/running, attach
-  // its SSE stream and pre-populate the queue from its current cardStatuses.
+  // On mount: load history. If a verify job is still pending/running, just
+  // surface a banner pointing the user to the History tab — don't lock the
+  // verify form, don't pre-populate the queue, don't auto-attach SSE. Users
+  // sharing the same login should be able to start additional verify jobs
+  // even when one is already in flight (the runner is detached and stores
+  // its own progress in the DB, so concurrency is fine).
   async function bootstrapFromJobHistory() {
     setHistoryLoading(true);
     try {
@@ -103,26 +107,16 @@ export default function VerifyGiftCardsPage() {
       const list = (await res.json()) as JobSummary[];
       setHistory(list);
 
-      const live = list.find((j) => j.status === "pending" || j.status === "running");
-      if (live) {
-        // Fetch the full job to populate the queue with current per-card state
-        const detailRes = await fetch(`/api/giftcards/jobs/${live.jobId}`);
-        if (detailRes.ok) {
-          const detail = (await detailRes.json()) as JobDetail;
-          setGiftCards(
-            detail.cardStatuses.map((c) => ({
-              cardNumber: c.cardNumber,
-              pin: c.pin || "",
-              balance: c.balance || "",
-              status: c.status === "success" ? "success" : c.status === "error" ? "error" : "",
-            }))
-          );
-          setLogs(detail.logs.map((l) => `[${l.level.toUpperCase()}] ${l.message}`));
-          setLoading(true);
-          setActiveJobId(live.jobId);
-          setResumedNotice(`Reconnected to a verify job already in progress (started ${formatRel(live.startedAt || live.createdAt)})`);
-          subscribeToJob(live.jobId);
-        }
+      const liveJobs = list.filter((j) => j.status === "pending" || j.status === "running");
+      if (liveJobs.length > 0) {
+        const newest = liveJobs[0]; // already sorted newest-first by the API
+        setResumedNotice(
+          `${liveJobs.length} verify job${liveJobs.length === 1 ? "" : "s"} currently running ` +
+          `(latest started ${formatRel(newest.startedAt || newest.createdAt)}). ` +
+          `See the History tab to watch progress — you can still start a new job below.`
+        );
+      } else {
+        setResumedNotice(null);
       }
     } catch { /* ignore — history fetch is best-effort */ }
     finally {
@@ -339,6 +333,10 @@ export default function VerifyGiftCardsPage() {
 
       setActiveJobId(data.jobId);
       setResumedNotice(null);
+      if (data.noVncUrl) {
+        setSuccess(`Job started — watch live: ${data.noVncUrl}`);
+        window.open(data.noVncUrl, "_blank", "noopener,noreferrer");
+      }
       subscribeToJob(data.jobId);
       refreshHistory();
     } catch {
