@@ -109,11 +109,18 @@ export class BrowserManager {
 
   /**
    * Kill any running Chrome process whose command-line contains the profile
-   * directory path — but ONLY if the profile isn't currently held by a live
-   * Chrome. We detect "live" via Chrome's own SingletonLock symlink (target
-   * format: `<hostname>-<pid>`); if that PID is alive, refuse the launch so
-   * we don't kill another concurrent job that's legitimately using the
-   * profile.
+   * directory path — but ONLY if the profile is currently held by a live
+   * Chrome that's actually running with this profile dir. We detect that
+   * via Chrome's own SingletonLock symlink (target format: `<hostname>-<pid>`)
+   * and verify the recorded PID is BOTH alive AND owns a Chrome process
+   * whose command line references this profile dir.
+   *
+   * The PID-only check (process.kill(pid, 0)) is too permissive — Linux
+   * recycles PIDs aggressively, so a stale lock left behind by a crashed
+   * Chrome routinely points at a recycled PID held by something completely
+   * unrelated (PM2 daemon, mongod, …). Cross-checking the cmdline avoids
+   * the false-positive "profile in use" error that locks users out of
+   * their own profiles after PM2 restarts.
    */
   private async killOrphanChrome(profileDir: string): Promise<void> {
     const abs = path.resolve(profileDir);
@@ -125,7 +132,7 @@ export class BrowserManager {
       const m = target.match(/-(\d+)$/);
       if (m) {
         const pid = parseInt(m[1], 10);
-        if (Number.isFinite(pid) && this.isPidAlive(pid)) {
+        if (Number.isFinite(pid) && this.isOwnedByChromeWithProfile(pid, abs)) {
           throw new Error(
             `Chrome profile "${path.basename(abs)}" is already in use by another running job (PID ${pid}). ` +
             `Pick a different Chrome profile for this job, or wait for the running one to finish.`
@@ -159,13 +166,37 @@ export class BrowserManager {
     }
   }
 
-  /** Check if a PID is reachable. Treats EPERM as "alive but not ours". */
-  private isPidAlive(pid: number): boolean {
+  /**
+   * Returns true iff the PID is alive AND its command line shows it's a
+   * Chrome process running with the given profile directory. Anything else
+   * (PID dead, PID recycled by an unrelated process, can't read cmdline)
+   * returns false — meaning the SingletonLock is stale and we can clean it.
+   */
+  private isOwnedByChromeWithProfile(pid: number, profileDir: string): boolean {
     try {
-      process.kill(pid, 0);
-      return true;
-    } catch (err) {
-      return (err as NodeJS.ErrnoException).code === "EPERM";
+      let cmdline: string;
+      if (process.platform === "linux") {
+        // /proc/<pid>/cmdline is NUL-delimited; replace with spaces for matching.
+        cmdline = fs
+          .readFileSync(`/proc/${pid}/cmdline`, "utf-8")
+          .replace(/\0/g, " ");
+      } else if (process.platform === "win32") {
+        cmdline = execSync(
+          `wmic process where ProcessId=${pid} get CommandLine /FORMAT:LIST`,
+          { stdio: ["ignore", "pipe", "ignore"] }
+        ).toString();
+      } else {
+        // macOS and other Unix variants — best-effort via ps.
+        cmdline = execSync(`ps -p ${pid} -o command=`, {
+          stdio: ["ignore", "pipe", "ignore"],
+        }).toString();
+      }
+      const lower = cmdline.toLowerCase();
+      return lower.includes("chrome") && cmdline.includes(profileDir);
+    } catch {
+      // Process gone, no permission, or unable to read cmdline — treat as
+      // stale lock so the launch can proceed and clean up.
+      return false;
     }
   }
 
