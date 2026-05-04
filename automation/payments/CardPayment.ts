@@ -94,20 +94,51 @@ export class CardPayment extends BasePayment {
     }
   }
 
+  // Phrases that indicate a card was declined or the payment was cancelled,
+  // either on Flipkart's "payment unsuccessful" page or on the bank / 3DS /
+  // PSP page itself. Order matters only for the matched-reason log line —
+  // first match wins so put the most specific phrases first.
+  private static readonly DECLINE_PHRASES = [
+    // Flipkart-side
+    "payment failed", "transaction failed", "payment declined",
+    "payment unsuccessful", "payment was not successful",
+    "unable to process", "could not be processed",
+    "try a different payment method", "try another payment method",
+    "order failed",
+
+    // Bank / 3DS / PSP-side
+    "transaction declined", "declined by issuer", "card declined",
+    "do not honour", "do not honor",
+    "authentication failed", "authorisation failed", "authorization failed",
+    "3d secure failed", "transaction unsuccessful",
+    "transaction cancelled", "payment cancelled", "request cancelled",
+    "transaction was cancelled", "user cancelled",
+    "card expired", "invalid card", "card not supported",
+    "insufficient", "limit exceeded", "exceeds limit",
+    "issuer rejected",
+  ];
+
   async isPaymentFailed(): Promise<boolean> {
+    return !!(await this.getDeclineReason());
+  }
+
+  /**
+   * Scan the visible page for any phrase that indicates a payment decline.
+   * Returns the matched phrase (so callers can log WHY the card was rejected),
+   * or null if no decline text is visible.
+   */
+  async getDeclineReason(): Promise<string | null> {
     try {
-      const failed = await this.page.evaluate(() => {
-        const text = document.body.innerText.toLowerCase();
-        return (
-          text.includes("payment failed") ||
-          text.includes("transaction failed") ||
-          text.includes("payment declined") ||
-          text.includes("insufficient")
-        );
-      });
-      return failed;
+      const phrases = CardPayment.DECLINE_PHRASES;
+      return await this.page.evaluate((phrasesArg: string[]) => {
+        const text = (document.body?.innerText || "").toLowerCase();
+        for (const phrase of phrasesArg) {
+          if (text.includes(phrase)) return phrase;
+        }
+        return null;
+      }, phrases);
     } catch {
-      return false;
+      return null;
     }
   }
 
