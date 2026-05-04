@@ -129,6 +129,26 @@ export default function ProfilesPage() {
     fetchProfiles();
   }
 
+  async function handleDeleteProfile(profile: Profile) {
+    if (
+      !confirm(
+        `Delete profile "${profile.name}"?\n\nThis will remove the saved Chrome session ` +
+          `(cookies, history, login state) for this profile. The action cannot be undone.\n\n` +
+          `If a job is currently using this profile the delete will be rejected — stop the job first.`
+      )
+    ) {
+      return;
+    }
+    const res = await fetch(`/api/profiles/${profile._id}`, { method: "DELETE" });
+    if (!res.ok) {
+      const data = await res.json().catch(() => ({}));
+      alert(data.error || "Failed to delete profile");
+      return;
+    }
+    fetchProfiles();
+  }
+
+
   if (loading) {
     return <div className="text-gray-500 text-center py-12">Loading...</div>;
   }
@@ -331,6 +351,13 @@ export default function ProfilesPage() {
                       </button>
                     )}
                   </div>
+                  <button
+                    onClick={() => handleDeleteProfile(profile)}
+                    className="px-4 py-2 rounded-xl text-sm font-medium transition-all bg-red-500/10 hover:bg-red-500/20 text-red-400 border border-red-500/20"
+                    title="Delete this profile (cookies, login state, on-disk data)"
+                  >
+                    Delete
+                  </button>
                 </div>
               </div>
             </div>
