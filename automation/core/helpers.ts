@@ -276,34 +276,31 @@ export async function navigateWithRetry(
     waitUntil = "domcontentloaded" as const,
   } = {}
 ): Promise<void> {
+  let lastErr = "";
   for (let attempt = 1; attempt <= maxRetries; attempt++) {
     try {
       console.log(
-        `Loading page (attempt ${attempt}/${maxRetries}, timeout ${timeoutMs / 1000}s)...`
+        `Loading page (attempt ${attempt}/${maxRetries}, timeout ${timeoutMs / 1000}s): ${url}`
       );
       await page.goto(url, { waitUntil, timeout: timeoutMs });
-      console.log(`Page loaded successfully on attempt ${attempt}`);
+      console.log(`Page loaded successfully on attempt ${attempt}: ${page.url()}`);
       return;
     } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      console.log(`Attempt ${attempt} failed: ${msg}`);
-
+      lastErr = err instanceof Error ? err.message : String(err);
+      console.log(`Attempt ${attempt} failed: ${lastErr}`);
       if (attempt < maxRetries) {
-        console.log(`Refreshing page...`);
+        // Re-attempt the same goto. Previously this called page.reload()
+        // which reloaded WHATEVER URL the page was currently on — not the
+        // requested `url` — and returned success, making callers think
+        // they had navigated when they hadn't. That bug is the root cause
+        // of "URL not opening, just refreshing" after login.
         await sleep(500);
-        try {
-          await page.reload({ waitUntil, timeout: timeoutMs });
-          console.log(`Page loaded after refresh on attempt ${attempt}`);
-          return;
-        } catch {
-          console.log(`Refresh also failed on attempt ${attempt}`);
-        }
       }
     }
   }
 
   throw new Error(
-    `Page failed to load after ${maxRetries} attempts: ${url}`
+    `Page failed to load after ${maxRetries} attempts (${url}): ${lastErr}`
   );
 }
 
