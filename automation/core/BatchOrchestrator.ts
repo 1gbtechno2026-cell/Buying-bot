@@ -10,10 +10,17 @@ import { InstaDdrService } from "../services/InstaDdrService";
 import { GmailOtpService } from "../services/GmailOtpService";
 import type { InstaDdrServiceLike } from "../platforms/BasePlatform";
 import { sleep, sendMessage } from "./helpers";
+import { CardDeclinedError } from "./errors";
 import type { JobConfig, ProductItem, CardDetails } from "../../src/types";
 import type { OrderDetails } from "../platforms/BasePlatform";
 import * as fs from "fs";
 import * as path from "path";
+
+// Where appendOrderToCsv writes per-day CSV files. Mirrors src/lib/orderReports
+// — kept inline because the runner is spawned by tsx and avoids src/ imports.
+function getOrderReportsDir(): string {
+  return process.env.ORDER_REPORTS_DIR || path.join(process.cwd(), "order-reports");
+}
 
 interface InventoryCode {
   codeIndex: number;
@@ -406,7 +413,21 @@ export class BatchOrchestrator {
         }
 
         // Wait for payment to complete
-        const success = await this.waitForPaymentCompletion();
+        const paymentResult = await this.waitForPaymentCompletion();
+
+        if (!paymentResult.ok && paymentResult.declineReason) {
+          // Card was declined (Flipkart side OR bank/PSP side). Throw a typed
+          // error so the iteration's catch can log "Card ending XXXX declined"
+          // and the next iteration's loginWithEmail naturally logs out the
+          // current account and signs in the next one.
+          const cardLast4 =
+            this.cards && this.cards.length > 0
+              ? this.cards[i % this.cards.length].cardNumber.slice(-4)
+              : "????";
+          throw new CardDeclinedError(cardLast4, paymentResult.declineReason);
+        }
+
+        const success = paymentResult.ok;
 
         if (success) {
           completed++;
@@ -450,13 +471,28 @@ export class BatchOrchestrator {
         }
       } catch (err) {
         failed++;
-        const errorMsg = err instanceof Error ? err.message : String(err);
-        sendMessage({
-          type: "log",
-          level: "error",
-          message: `Iteration ${i + 1} failed: ${errorMsg}`,
-          iteration: i + 1,
-        });
+        if (err instanceof CardDeclinedError) {
+          sendMessage({
+            type: "log",
+            level: "error",
+            message: `Card ending ${err.cardLast4} declined: ${err.reason}`,
+            iteration: i + 1,
+          });
+          sendMessage({
+            type: "log",
+            level: "info",
+            message: `Skipping iteration ${i + 1} — moving to next account`,
+            iteration: i + 1,
+          });
+        } else {
+          const errorMsg = err instanceof Error ? err.message : String(err);
+          sendMessage({
+            type: "log",
+            level: "error",
+            message: `Iteration ${i + 1} failed: ${errorMsg}`,
+            iteration: i + 1,
+          });
+        }
         sendMessage({
           type: "progress",
           iteration: i + 1,
@@ -1357,6 +1393,12 @@ export class BatchOrchestrator {
         }
         break;
       } catch (err) {
+        // A declined card is a definitive failure for this iteration — never
+        // retry the same card. Surface it so the iteration's outer catch can
+        // log the per-card decline and the next iteration rotates accounts.
+        if (err instanceof CardDeclinedError) {
+          throw err;
+        }
         const errMsg = err instanceof Error ? err.message : String(err);
         if (payAttempt < maxPaymentRetries) {
           sendMessage({
@@ -1379,28 +1421,50 @@ export class BatchOrchestrator {
     }
   }
 
-  private async waitForPaymentCompletion(): Promise<boolean> {
+  private async waitForPaymentCompletion(): Promise<
+    { ok: true } | { ok: false; declineReason: string | null }
+  > {
     const baseTimeout = 120_000; // 2 minutes base
     const maxTimeout = 300_000; // 5 minutes max (extended for OTP/bank pages)
     const absoluteMax = Date.now() + maxTimeout; // Hard ceiling
     let deadline = Date.now() + baseTimeout;
     let lastState = "";
+    let wasOnBank = false;
+
+    // CardPayment.getDeclineReason is the broad-phrase scanner; gate on
+    // payment type so we don't add overhead for non-card flows that never
+    // hit a bank page.
+    const declineScanner =
+      this.payment instanceof CardPayment ? (this.payment as CardPayment) : null;
 
     while (Date.now() < deadline) {
-      // Check for order confirmation
+      // Order confirmed → success
       if (await this.platform.isOrderConfirmationVisible()) {
         sendMessage({ type: "log", level: "info", message: "Order confirmed!" });
-        return true;
+        return { ok: true };
       }
 
-      // Check for payment failure
-      if (await this.payment.isPaymentFailed()) {
+      // Decline detected on whatever page we're currently looking at.
+      // For card flows the scanner covers Flipkart's "unsuccessful" page AND
+      // common bank/PSP wording ("transaction declined", "do not honour", …).
+      if (declineScanner) {
+        const reason = await declineScanner.getDeclineReason();
+        if (reason) {
+          sendMessage({
+            type: "log",
+            level: "error",
+            message: `Card declined detected: "${reason}"`,
+          });
+          return { ok: false, declineReason: reason };
+        }
+      } else if (await this.payment.isPaymentFailed()) {
         sendMessage({ type: "log", level: "error", message: "Payment failed" });
-        return false;
+        return { ok: false, declineReason: "payment failed" };
       }
 
-      // Check if we're on an intermediate page (OTP, bank redirect, payment gateway)
-      // If so, extend the timeout — the user/system is still processing
+      // Track URL transitions: bank → back-to-flipkart with no order confirmation
+      // is a strong decline signal that lets us fail fast (instead of waiting
+      // out the 5-minute ceiling).
       const currentState = await this.detectPageState();
       if (currentState !== lastState && currentState !== "unknown") {
         sendMessage({
@@ -1409,6 +1473,49 @@ export class BatchOrchestrator {
           message: `Payment in progress: ${currentState}`,
         });
         lastState = currentState;
+      }
+      if (currentState === "bank_redirect") {
+        wasOnBank = true;
+      }
+
+      // If we WERE on a bank page and now we're back on Flipkart with no order
+      // confirmation, give it ~8 s for the confirmation page to render OR for
+      // a decline message to surface; otherwise treat as decline.
+      if (wasOnBank && declineScanner) {
+        let onFlipkartNow = false;
+        try {
+          onFlipkartNow = await this.page.evaluate(() => {
+            const u = window.location.href.toLowerCase();
+            return u.includes("flipkart.com");
+          });
+        } catch { /* page in transition */ }
+
+        if (onFlipkartNow) {
+          const bounceDeadline = Date.now() + 8_000;
+          while (Date.now() < bounceDeadline) {
+            if (await this.platform.isOrderConfirmationVisible()) {
+              sendMessage({ type: "log", level: "info", message: "Order confirmed!" });
+              return { ok: true };
+            }
+            const reason = await declineScanner.getDeclineReason();
+            if (reason) {
+              sendMessage({
+                type: "log",
+                level: "error",
+                message: `Card declined detected after bank redirect: "${reason}"`,
+              });
+              return { ok: false, declineReason: reason };
+            }
+            await sleep(500);
+          }
+          // Neither confirmation nor a matched decline phrase appeared after
+          // bouncing back. Treat as a silent decline rather than waiting out
+          // the full 5-minute ceiling.
+          return {
+            ok: false,
+            declineReason: "bank returned without order confirmation",
+          };
+        }
       }
 
       if (
@@ -1436,7 +1543,7 @@ export class BatchOrchestrator {
       level: "warn",
       message: "Payment verification timed out",
     });
-    return false;
+    return { ok: false, declineReason: null };
   }
 
   /**
@@ -1593,7 +1700,7 @@ export class BatchOrchestrator {
    * CSV columns: PLATFORM ID, MODEL, COLOUR, QTY, PIN CODE, AMOUNT, PER PC, ORDER ID, ORDER DATE, GST NAME
    */
   private appendOrderToCsv(order: OrderDetails, accountEmail: string, gstName: string): void {
-    const reportsDir = path.resolve("order-reports");
+    const reportsDir = getOrderReportsDir();
     if (!fs.existsSync(reportsDir)) {
       fs.mkdirSync(reportsDir, { recursive: true });
     }

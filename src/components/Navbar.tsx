@@ -16,6 +16,7 @@ const navLinks = [
   { href: "/dashboard/amazon-accounts", label: "AZ Accounts" },
   { href: "/dashboard/instaddr", label: "InstaDDR" },
   { href: "/dashboard/history", label: "History" },
+  { href: "/dashboard/reports", label: "Reports" },
 ];
 
 export default function Navbar() {
