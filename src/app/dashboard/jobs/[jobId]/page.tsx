@@ -258,6 +258,18 @@ export default function JobDetailPage({
               Rerun Job
             </button>
           )}
+          {/* Download per-job CSV. Available the moment the runner has logged
+              its first iteration row — hidden only while the job is still
+              pending and has produced nothing. */}
+          {job.status !== "pending" && (
+            <a
+              href={`/api/jobs/${jobId}/report`}
+              download={`orders-job-${jobId}.tsv`}
+              className="px-4 py-2 bg-blue-700 hover:bg-blue-600 rounded-lg text-sm transition-colors text-white"
+            >
+              Download CSV
+            </a>
+          )}
         </div>
       </div>
 

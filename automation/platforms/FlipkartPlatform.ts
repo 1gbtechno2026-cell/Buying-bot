@@ -1045,37 +1045,117 @@ export class FlipkartPlatform extends BasePlatform {
   async extractOrderDetails(): Promise<OrderDetails> {
     console.log("[extractOrderDetails] Extracting order details from Flipkart confirmation page...");
     try {
+      // Give the confirmation page another second — sometimes the amount and
+      // order ID render after the redirect resolves.
+      await sleep(1200);
+
       const details = await this.page.evaluate(() => {
         const body = document.body?.innerText || "";
         const allText = body.replace(/\s+/g, " ");
 
-        // Extract Order ID (OD followed by digits)
+        // 1) ORDER ID — Flipkart formats orderIds as "OD" + 18 digits, but
+        //    older flows use 12-22 digits. Also accept the URL fallback.
         let orderId = "";
         const orderIdMatch = allText.match(/OD\d{10,}/);
         if (orderIdMatch) orderId = orderIdMatch[0];
+        if (!orderId) {
+          const urlMatch = window.location.href.match(/OD\d{10,}/);
+          if (urlMatch) orderId = urlMatch[0];
+        }
 
-        // Extract product model/name — look for the product title on confirmation page
+        // 2) PRODUCT MODEL — try in order of specificity:
+        //    a. Anchor pointing at /p/itm... (product link on order page)
+        //    b. Largest <h1>/<h2> on the page
+        //    c. The longest line preceding the price block
+        //    d. Fallback: any css-146c3p1 div with 20+ chars excluding noise.
         let model = "";
-        const titleEls = document.querySelectorAll("div.css-146c3p1, span.css-146c3p1");
-        for (const el of titleEls) {
-          const text = (el.textContent || "").trim();
-          // Product names are usually long (>20 chars) and contain brand keywords
-          if (text.length > 20 && !text.startsWith("OD") && !text.toLowerCase().includes("order") &&
-              !text.toLowerCase().includes("place") && !text.toLowerCase().includes("deliver")) {
-            model = text;
-            break;
+        const productLink = document.querySelector(
+          'a[href*="/p/itm"], a[href*="/p/"]'
+        ) as HTMLAnchorElement | null;
+        if (productLink) {
+          const t = (productLink.textContent || "").trim();
+          if (t.length > 5) model = t;
+        }
+        if (!model) {
+          const headings = document.querySelectorAll("h1, h2");
+          for (const h of headings) {
+            const t = (h.textContent || "").trim();
+            if (t.length > 10 && t.length < 200) {
+              model = t;
+              break;
+            }
+          }
+        }
+        if (!model) {
+          const titleEls = document.querySelectorAll(
+            "div.css-146c3p1, span.css-146c3p1, div[dir='auto']"
+          );
+          const NOISE = [
+            "order", "place", "deliver", "address", "payment",
+            "thank", "total", "sub-total", "subtotal", "shipping",
+            "estimated", "expected", "secure", "track",
+          ];
+          for (const el of titleEls) {
+            const text = (el.textContent || "").trim();
+            const lower = text.toLowerCase();
+            if (
+              text.length > 20 &&
+              text.length < 250 &&
+              !text.startsWith("OD") &&
+              !NOISE.some((n) => lower.startsWith(n)) &&
+              !/^\d/.test(text)
+            ) {
+              model = text;
+              break;
+            }
           }
         }
 
-        // Extract colour — look for common colour keywords in the product details
+        // 3) COLOUR — first try explicit "Colour: X" / "Color: X", then fall
+        //    back to common colour keywords appearing inside the product title.
         let colour = "";
-        const colourMatch = allText.match(/(?:colou?r|shade)[:\s]*([A-Za-z\s]+?)(?:,|\.|;|\s{2}|\n|$)/i);
-        if (colourMatch) colour = colourMatch[1].trim();
+        const colourLabel = allText.match(/(?:colou?r|shade)[:\s]+([A-Za-z][A-Za-z\s]{1,30}?)(?:,|\.|;|\s{2}|\n|$)/i);
+        if (colourLabel) colour = colourLabel[1].trim();
+        if (!colour && model) {
+          const COLOURS = [
+            "black", "white", "blue", "red", "green", "yellow", "pink",
+            "purple", "grey", "gray", "silver", "gold", "rose", "graphite",
+            "midnight", "starlight", "titanium", "navy", "beige",
+          ];
+          for (const c of COLOURS) {
+            const re = new RegExp(`\\b${c}\\b`, "i");
+            if (re.test(model)) { colour = c; break; }
+          }
+        }
 
-        // Extract amount/price — look for ₹ or Rs followed by numbers
+        // 4) AMOUNT — prefer the "Total / Total Amount / Order Total / Amount
+        //    Paid" section. Fall back to the largest ₹ on the page.
         let amount = "";
-        const priceMatch = allText.match(/(?:₹|Rs\.?)\s*([\d,]+)/);
-        if (priceMatch) amount = priceMatch[1].replace(/,/g, "");
+        const priceLabels = [
+          "amount paid",
+          "total amount",
+          "order total",
+          "grand total",
+          "total payable",
+        ];
+        const lowerAll = allText.toLowerCase();
+        for (const label of priceLabels) {
+          const idx = lowerAll.indexOf(label);
+          if (idx >= 0) {
+            const slice = allText.slice(idx, idx + 200);
+            const m = slice.match(/(?:₹|Rs\.?)\s*([\d,]+(?:\.\d{1,2})?)/);
+            if (m) { amount = m[1].replace(/,/g, ""); break; }
+          }
+        }
+        if (!amount) {
+          // Largest ₹ value on the page is usually the order total.
+          const allPrices = Array.from(allText.matchAll(/(?:₹|Rs\.?)\s*([\d,]+(?:\.\d{1,2})?)/g))
+            .map((m) => Number(m[1].replace(/,/g, "")))
+            .filter((n) => Number.isFinite(n) && n > 0);
+          if (allPrices.length > 0) {
+            amount = String(Math.max(...allPrices));
+          }
+        }
 
         return { orderId, model, colour, amount };
       });

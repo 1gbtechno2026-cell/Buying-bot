@@ -427,28 +427,34 @@ export class BatchOrchestrator {
           throw new CardDeclinedError(cardLast4, paymentResult.declineReason);
         }
 
-        const success = paymentResult.ok;
+        const totalQty = this.config.products?.reduce((sum, p) => sum + p.quantity, 0) ?? this.config.perOrderQuantity;
+        const pinCode = this.config.address?.checkoutPincode || this.config.address?.pincode || "";
+        const gstName = this.config.address?.companyName || "";
 
-        if (success) {
+        if (paymentResult.ok) {
           completed++;
-
-          // Extract order details and append to CSV
+          let orderDetails: OrderDetails | undefined;
           try {
-            const orderDetails = await this.platform.extractOrderDetails();
-            // Fill in data from config
-            const loginEmail = this.accounts?.[i % this.accounts.length] ||
-              this.instaDdrAccounts?.[i % this.instaDdrAccounts.length]?.email || "";
-            const totalQty = this.config.products?.reduce((sum, p) => sum + p.quantity, 0) ?? this.config.perOrderQuantity;
-            const pinCode = this.config.address?.checkoutPincode || this.config.address?.pincode || "";
-            const gstName = this.config.address?.companyName || "";
-
+            orderDetails = await this.platform.extractOrderDetails();
             orderDetails.quantity = totalQty;
             orderDetails.pinCode = pinCode;
             if (orderDetails.amount && totalQty > 0) {
               orderDetails.perPc = String(Math.round(Number(orderDetails.amount) / totalQty));
             }
+          } catch (csvErr) {
+            console.log(`extractOrderDetails warning: ${csvErr instanceof Error ? csvErr.message : csvErr}`);
+          }
 
-            this.appendOrderToCsv(orderDetails, loginEmail, gstName);
+          try {
+            this.appendOrderRow({
+              iteration: i + 1,
+              status: "completed",
+              accountEmail: this.emailForIteration(i),
+              gstName,
+              pinCode,
+              qty: totalQty,
+              order: orderDetails,
+            });
           } catch (csvErr) {
             console.log(`CSV export warning: ${csvErr instanceof Error ? csvErr.message : csvErr}`);
           }
@@ -461,6 +467,21 @@ export class BatchOrchestrator {
           });
         } else {
           failed++;
+          // Generic timeout (no specific decline phrase). Log a row with
+          // status=failed so the per-job CSV still has a complete record.
+          try {
+            this.appendOrderRow({
+              iteration: i + 1,
+              status: "failed",
+              accountEmail: this.emailForIteration(i),
+              gstName,
+              pinCode,
+              qty: totalQty,
+              note: "payment verification timed out",
+            });
+          } catch (csvErr) {
+            console.log(`CSV export warning: ${csvErr instanceof Error ? csvErr.message : csvErr}`);
+          }
           sendMessage({
             type: "progress",
             iteration: i + 1,
@@ -471,6 +492,26 @@ export class BatchOrchestrator {
         }
       } catch (err) {
         failed++;
+        // Always record the iteration in the CSV with the right status.
+        const totalQtyForRow = this.config.products?.reduce((sum, p) => sum + p.quantity, 0) ?? this.config.perOrderQuantity;
+        const pinCodeForRow = this.config.address?.checkoutPincode || this.config.address?.pincode || "";
+        const gstNameForRow = this.config.address?.companyName || "";
+        try {
+          this.appendOrderRow({
+            iteration: i + 1,
+            status: err instanceof CardDeclinedError ? "declined" : "failed",
+            accountEmail: this.emailForIteration(i),
+            gstName: gstNameForRow,
+            pinCode: pinCodeForRow,
+            qty: totalQtyForRow,
+            note: err instanceof CardDeclinedError
+              ? `card ending ${err.cardLast4}: ${err.reason}`
+              : (err instanceof Error ? err.message : String(err)).slice(0, 300),
+          });
+        } catch (csvErr) {
+          console.log(`CSV export warning: ${csvErr instanceof Error ? csvErr.message : csvErr}`);
+        }
+
         if (err instanceof CardDeclinedError) {
           sendMessage({
             type: "log",
@@ -478,6 +519,35 @@ export class BatchOrchestrator {
             message: `Card ending ${err.cardLast4} declined: ${err.reason}`,
             iteration: i + 1,
           });
+          // Card decline leaves the browser stranded on a bank/3DS page with
+          // the Flipkart session still alive. The next iteration's
+          // loginWithEmail() can't find Request OTP because Flipkart auto-
+          // signs the user back in. Force-recover: go to flipkart.com home,
+          // then explicit logout. Best effort — never let this throw.
+          if (this.platform instanceof FlipkartPlatform) {
+            try {
+              sendMessage({
+                type: "log",
+                level: "info",
+                message: "Recovering: navigating to Flipkart home and logging out…",
+                iteration: i + 1,
+              });
+              await this.page.goto("https://www.flipkart.com/", {
+                waitUntil: "domcontentloaded",
+                timeout: 15000,
+              });
+              await sleep(800);
+              await this.platform.logout();
+            } catch (recoverErr) {
+              const msg = recoverErr instanceof Error ? recoverErr.message : String(recoverErr);
+              sendMessage({
+                type: "log",
+                level: "warn",
+                message: `Post-decline recovery failed (continuing): ${msg}`,
+                iteration: i + 1,
+              });
+            }
+          }
           sendMessage({
             type: "log",
             level: "info",
@@ -1696,48 +1766,84 @@ export class BatchOrchestrator {
   }
 
   /**
-   * Append order details to a date-named CSV file in order-reports/.
-   * CSV columns: PLATFORM ID, MODEL, COLOUR, QTY, PIN CODE, AMOUNT, PER PC, ORDER ID, ORDER DATE, GST NAME
+   * Append a row to this job's CSV (one file per job: order-reports/job-<jobId>.csv).
+   * Called for EVERY iteration — completed, declined and failed — with the
+   * STATUS column reflecting what happened. The row is tab-separated; the
+   * file extension stays `.csv` for back-compat with existing tooling, but
+   * the API serves it with a `.tsv` filename so Excel imports columns
+   * correctly.
+   *
+   * Columns: ITERATION | STATUS | ACCOUNT EMAIL | MODEL | COLOUR | QTY |
+   *          PIN CODE | AMOUNT | PER PC | ORDER ID | ORDER DATE | GST NAME |
+   *          NOTE
    */
-  private appendOrderToCsv(order: OrderDetails, accountEmail: string, gstName: string): void {
+  private appendOrderRow(args: {
+    iteration: number;
+    status: "completed" | "declined" | "failed";
+    accountEmail: string;
+    gstName: string;
+    pinCode: string;
+    qty: number;
+    note?: string;
+    order?: OrderDetails;
+  }): void {
     const reportsDir = getOrderReportsDir();
     if (!fs.existsSync(reportsDir)) {
       fs.mkdirSync(reportsDir, { recursive: true });
     }
 
-    // File named by today's date: 2026-04-09.csv
-    const today = new Date().toISOString().slice(0, 10); // YYYY-MM-DD
-    const csvPath = path.join(reportsDir, `${today}.csv`);
+    const jobId = this.config.jobId || "unknown";
+    const csvPath = path.join(reportsDir, `job-${jobId}.csv`);
 
-    const headers = "PLATFORM ID\tMODEL\tCOLOUR\tQTY\tPIN CODE\tAMOUNT\tPER PC\tORDER ID\tORDER DATE\tGST NAME";
+    const headers = [
+      "ITERATION", "STATUS", "ACCOUNT EMAIL", "MODEL", "COLOUR", "QTY",
+      "PIN CODE", "AMOUNT", "PER PC", "ORDER ID", "ORDER DATE", "GST NAME",
+      "NOTE",
+    ].join("\t");
 
-    // Create file with headers if it doesn't exist
     if (!fs.existsSync(csvPath)) {
       fs.writeFileSync(csvPath, headers + "\n", "utf-8");
       console.log(`[CSV] Created ${csvPath}`);
     }
 
-    // Build row
+    const o = args.order;
     const row = [
-      accountEmail,
-      order.model,
-      order.colour,
-      String(order.quantity),
-      order.pinCode,
-      order.amount,
-      order.perPc,
-      order.orderId,
-      order.orderDate,
-      gstName,
-    ].map(v => v.replace(/\t/g, " ")).join("\t");
+      String(args.iteration),
+      args.status,
+      args.accountEmail || "",
+      o?.model || "",
+      o?.colour || "",
+      String(args.qty || o?.quantity || 0),
+      args.pinCode || o?.pinCode || "",
+      o?.amount || "",
+      o?.perPc || "",
+      o?.orderId || "",
+      o?.orderDate || new Date().toLocaleDateString("en-GB", { day: "2-digit", month: "short" }),
+      args.gstName || "",
+      args.note || "",
+    ].map((v) => String(v).replace(/[\t\r\n]/g, " ")).join("\t");
 
     fs.appendFileSync(csvPath, row + "\n", "utf-8");
-    console.log(`[CSV] Appended order ${order.orderId || "(no ID)"} to ${csvPath}`);
+    console.log(`[CSV] Iter ${args.iteration} (${args.status}) → ${csvPath}`);
 
     sendMessage({
       type: "log",
       level: "info",
-      message: `Order logged to CSV: ${csvPath} (Order ID: ${order.orderId || "N/A"})`,
+      message: `Iteration ${args.iteration} logged: ${args.status}` +
+        (o?.orderId ? ` (Order ID ${o.orderId})` : ""),
+      iteration: args.iteration,
     });
+  }
+
+  // Email used for the given iteration index (0-based). Mirrors the rotation
+  // logic at the top of run(). Returns "" if no account/InstaDDR rotation.
+  private emailForIteration(i: number): string {
+    if (this.accounts && this.accounts.length > 0) {
+      return this.accounts[i % this.accounts.length] || "";
+    }
+    if (this.instaDdrAccounts && this.instaDdrAccounts.length > 0) {
+      return this.instaDdrAccounts[i % this.instaDdrAccounts.length]?.email || "";
+    }
+    return "";
   }
 }
