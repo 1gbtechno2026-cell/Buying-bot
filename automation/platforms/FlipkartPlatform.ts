@@ -144,65 +144,119 @@ export class FlipkartPlatform extends BasePlatform {
 
   /**
    * Read the visible product details (model, colour, price) from the
-   * Flipkart product page. Uses the stable `font` attribute that Flipkart
-   * applies to its typography divs:
-   *   - `font="default-fk-font-l"`  → large text (colour label, e.g. "Blue Shadow")
-   *   - `font="default-fk-font-m"`  → medium text (price, e.g. "₹95,990")
-   * The CSS classes themselves are dynamic and unreliable; the `font`
-   * attribute survives across deploys.
+   * Flipkart product page.
+   *
+   *  - COLOUR: find the "Selected Color:" label (a div[font="default-fk-font-l"])
+   *    and read its NEXT SIBLING. That's the precise structure Flipkart uses
+   *    on the product page; previously we guessed colour from any short
+   *    alpha text in a `font="default-fk-font-l"` div, which sometimes picked
+   *    up unrelated headings.
+   *  - PRICE: read it from the Buy Now button. The button's gradient div
+   *    (`linear-gradient(90deg, rgb(255, 229, 31), rgb(255, 205, 3))`) is
+   *    Flipkart's stable yellow CTA background; walk up to the button
+   *    container and pull ₹X,XXX out of its text.
+   *  - MODEL: <h1> → span.B_NuCI fallback (unchanged).
+   *
+   * Each section also has a fallback so a future Flipkart redesign that
+   * removes the new selectors still gets us reasonable values.
    *
    * Best-effort: returns "" for any field that can't be found. Never throws.
    */
   async captureProductDetails(): Promise<{ model: string; colour: string; amount: string }> {
     try {
       return await this.page.evaluate(() => {
-        // Price: first <div font="default-fk-font-m"> whose text starts with ₹.
-        // Multiple candidates may exist (final + strikethrough MRP). Pick the
-        // largest numeric value — the final price is always the highest visible
-        // ₹ block on the active variant (struck-through MRP excluded by Flipkart's
-        // markup, which uses a different class for that).
-        let amount = "";
-        const priceCandidates = Array.from(
-          document.querySelectorAll('div[font="default-fk-font-m"]')
-        ) as HTMLElement[];
-        const priceValues: number[] = [];
-        for (const el of priceCandidates) {
-          const t = (el.innerText || el.textContent || "").trim();
-          const m = t.match(/^₹\s*([\d,]+(?:\.\d{1,2})?)$/);
-          if (m) {
-            const v = Number(m[1].replace(/,/g, ""));
-            if (Number.isFinite(v) && v > 0) priceValues.push(v);
-          }
-        }
-        if (priceValues.length > 0) {
-          // Final price is normally the highest legitimate value on the page.
-          amount = String(Math.max(...priceValues));
-        }
-
-        // Colour label: <div font="default-fk-font-l"> with short alpha text
-        // like "Blue Shadow". Skip ones that look like prices, headings or
-        // long product titles.
+        // ─── COLOUR ────────────────────────────────────────────────────────
+        // Primary: <div font="default-fk-font-l">Selected Color:</div>
+        //          + next sibling = the colour name ("Blue Shadow")
         let colour = "";
         const labelDivs = Array.from(
           document.querySelectorAll('div[font="default-fk-font-l"]')
         ) as HTMLElement[];
-        for (const el of labelDivs) {
-          const t = (el.innerText || el.textContent || "").trim();
-          if (!t) continue;
-          // Single-line, short, mostly alphabetic — that's the colour label.
+        for (const lbl of labelDivs) {
+          const t = (lbl.innerText || lbl.textContent || "").trim().toLowerCase();
           if (
-            t.length >= 3 &&
-            t.length <= 40 &&
-            !/[₹\d]/.test(t) &&
-            /^[A-Za-z][A-Za-z\s'/-]*$/.test(t)
+            t === "selected color:" ||
+            t === "selected colour:" ||
+            t === "color:" ||
+            t === "colour:"
           ) {
-            colour = t;
-            break;
+            // Walk forward through following siblings until we find a non-empty one.
+            let sib = lbl.nextElementSibling as HTMLElement | null;
+            while (sib) {
+              const v = (sib.innerText || sib.textContent || "").trim();
+              if (v && v.length >= 2 && v.length <= 60) {
+                colour = v;
+                break;
+              }
+              sib = sib.nextElementSibling as HTMLElement | null;
+            }
+            if (colour) break;
+          }
+        }
+        // Fallback: any short alphabetic font-l div if no labelled match.
+        if (!colour) {
+          for (const el of labelDivs) {
+            const t = (el.innerText || el.textContent || "").trim();
+            if (
+              t.length >= 3 &&
+              t.length <= 40 &&
+              !/[₹\d:]/.test(t) &&
+              /^[A-Za-z][A-Za-z\s'/-]*$/.test(t)
+            ) {
+              colour = t;
+              break;
+            }
           }
         }
 
-        // Model / product title: prefer <h1>, fall back to <span class*="B_NuCI">
-        // (Flipkart's classic title class) then to URL-derived later.
+        // ─── PRICE ─────────────────────────────────────────────────────────
+        // Primary: locate Flipkart's Buy Now button by its yellow gradient
+        // background, then walk up the DOM to find the enclosing button
+        // text containing the ₹ amount.
+        let amount = "";
+        const gradients = Array.from(
+          document.querySelectorAll('div[style*="linear-gradient"]')
+        ) as HTMLElement[];
+        const isBuyNowGradient = (style: string) =>
+          style.includes("rgb(255, 229, 31)") &&
+          style.includes("rgb(255, 205, 3)");
+        for (const g of gradients) {
+          const style = g.getAttribute("style") || "";
+          if (!isBuyNowGradient(style)) continue;
+          // Walk up to 6 ancestors looking for ₹ in the text content.
+          let cur: HTMLElement | null = g;
+          for (let depth = 0; depth < 6 && cur; depth++) {
+            const txt = (cur.innerText || cur.textContent || "").trim();
+            const m = txt.match(/₹\s*([\d,]+(?:\.\d{1,2})?)/);
+            if (m) {
+              const v = Number(m[1].replace(/,/g, ""));
+              if (Number.isFinite(v) && v > 0) {
+                amount = String(v);
+                break;
+              }
+            }
+            cur = cur.parentElement;
+          }
+          if (amount) break;
+        }
+        // Fallback: largest "₹X" inside any div[font="default-fk-font-m"] block.
+        if (!amount) {
+          const priceCandidates = Array.from(
+            document.querySelectorAll('div[font="default-fk-font-m"]')
+          ) as HTMLElement[];
+          const vals: number[] = [];
+          for (const el of priceCandidates) {
+            const t = (el.innerText || el.textContent || "").trim();
+            const m = t.match(/^₹\s*([\d,]+(?:\.\d{1,2})?)$/);
+            if (m) {
+              const v = Number(m[1].replace(/,/g, ""));
+              if (Number.isFinite(v) && v > 0) vals.push(v);
+            }
+          }
+          if (vals.length > 0) amount = String(Math.max(...vals));
+        }
+
+        // ─── MODEL ─────────────────────────────────────────────────────────
         let model = "";
         const h1 = document.querySelector("h1");
         if (h1) {
