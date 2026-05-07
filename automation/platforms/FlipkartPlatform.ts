@@ -695,6 +695,24 @@ export class FlipkartPlatform extends BasePlatform {
 
   async addToCart(): Promise<void> {
     console.log("Waiting for Add to Cart button...");
+      await waitWithRetry(
+    this.page,
+    async () => {
+      await this.page.waitForFunction(
+        () => (document.body?.innerText?.length || 0) > 500,
+        { timeout: 15000 }
+      );
+    },
+    {
+      label: "Page hydration",
+      timeoutMs: 15000,
+      maxRetries: 5,
+    }
+  );
+
+  await sleep(DELAYS.long);
+
+  console.log("Waiting for Add to Cart button...");
 
     // Wait for either: SVG cart icon OR text-based "Add to Cart" button
     await waitWithRetry(
