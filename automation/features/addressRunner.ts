@@ -125,14 +125,37 @@ async function main() {
     // =========================================================
     // STEP 2: Check if address already exists
     // =========================================================
+    // Per-card match (not a page-wide body-text scan). A saved address counts
+    // as "already exists" only when the SAME card carries the name AND pincode
+    // AND (mobile OR the address-line prefix). Page-wide matching used to both
+    // false-positive (skip a genuinely missing address) and false-negative
+    // (re-add a duplicate) because the keywords could come from different
+    // cards. Strong same-card identifiers fix both.
     const addressExists = await page.evaluate(
       (addr: AddressDetails) => {
-        const allText = document.body.innerText.toLowerCase();
-        const nameMatch = allText.includes(addr.name.toLowerCase());
-        const cityMatch = allText.includes(addr.city.toLowerCase());
-        const localityMatch = allText.includes(addr.locality.toLowerCase());
-        const matchCount = [nameMatch, cityMatch, localityMatch].filter(Boolean).length;
-        return matchCount >= 2;
+        const norm = (s: string) => (s || "").toLowerCase().replace(/\s+/g, " ").trim();
+        const name = norm(addr.name);
+        const pincode = (addr.pincode || "").replace(/\D/g, "");
+        const mobile = (addr.mobile || "").replace(/\D/g, "");
+        const line1 = norm(addr.addressLine1).slice(0, 20);
+
+        // Prefer real saved-address card containers; fall back to all divs.
+        const cards = Array.from(
+          document.querySelectorAll(".CHc0Fj, .cDeXU9, [data-testid*='address'], [class*='address']")
+        );
+        const pool = cards.length ? cards : Array.from(document.querySelectorAll("div"));
+
+        for (const card of pool) {
+          const text = norm((card as HTMLElement).innerText || card.textContent || "");
+          if (!text) continue;
+          const digits = ((card as HTMLElement).innerText || card.textContent || "").replace(/\D/g, "");
+          const nameOk = !!name && text.includes(name);
+          const pinOk = !!pincode && digits.includes(pincode);
+          const mobOk = !!mobile && digits.includes(mobile);
+          const lineOk = !!line1 && text.includes(line1);
+          if (nameOk && pinOk && (mobOk || lineOk)) return true;
+        }
+        return false;
       },
       config.address
     );
@@ -185,21 +208,21 @@ async function main() {
       // STEP 4: Fill address form fields
       // =========================================================
 
+      // Fields are filled via the native value setter (fast path in
+      // clearAndType) which React consumes synchronously — no inter-field
+      // sleeps needed.
+
       // Name
       await clearAndType(page, 'input[name="name"]', config.address.name, "Name field");
-      await sleep(200);
 
       // 10-digit mobile number
       await clearAndType(page, 'input[name="phone"]', config.address.mobile, "Mobile field");
-      await sleep(200);
 
       // Pincode
       await clearAndType(page, 'input[name="pincode"]', config.address.pincode, "Pincode field");
-      await sleep(200);
 
       // Locality
       await clearAndType(page, 'input[name="addressLine2"]', config.address.locality, "Locality field");
-      await sleep(200);
 
       // Address (Area and Street)
       await clearAndType(
@@ -208,11 +231,9 @@ async function main() {
         config.address.addressLine1,
         "Address field"
       );
-      await sleep(200);
 
       // City/District/Town
       await clearAndType(page, 'input[name="city"]', config.address.city, "City field");
-      await sleep(200);
 
       // State (select from dropdown)
       await waitWithRetry(

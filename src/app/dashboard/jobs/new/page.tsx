@@ -295,6 +295,12 @@ export default function NewJobPage() {
           products: products.map((p) => ({ url: p.url.trim(), quantity: p.quantity })),
           totalQuantity: totalQuantity * effectiveIterations,
           perOrderQuantity: totalQuantity,
+          // Explicit repeat count. For multi-product / cart jobs the orchestrator
+          // places the whole cart once per repeatOrders (it no longer derives the
+          // count from totalQuantity/perOrderQuantity, which over-orders if those
+          // are set independently). Equals the iteration count so single-product
+          // jobs are unchanged.
+          repeatOrders: effectiveIterations,
           intervalSeconds,
           chromeProfileId,
           ...(useRotation

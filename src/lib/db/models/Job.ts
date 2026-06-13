@@ -24,6 +24,7 @@ export interface IJob extends Document {
   instaDdrAccountIds?: mongoose.Types.ObjectId[]; // InstaDDR account groups for OTP automation
   checkoutPincode: string;
   maxConcurrentTabs: number; // max simultaneous tabs for RTGS multi-tab mode
+  repeatOrders: number; // multi-product jobs: how many times to place the whole-cart order (default 1)
   status: "pending" | "running" | "paused" | "completed" | "failed" | "cancelled";
   progress: {
     totalIterations: number;
@@ -126,6 +127,11 @@ const JobSchema = new Schema<IJob>(
       default: "",
     },
     maxConcurrentTabs: {
+      type: Number,
+      default: 1,
+      min: 1,
+    },
+    repeatOrders: {
       type: Number,
       default: 1,
       min: 1,

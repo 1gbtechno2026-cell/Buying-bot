@@ -134,7 +134,8 @@ export async function clearAndType(
   value: string,
   label = "",
   sensitive = false,
-  isPaymentPage?: () => Promise<boolean>
+  isPaymentPage?: () => Promise<boolean>,
+  humanType = false
 ): Promise<void> {
   console.log(`Typing into ${label || selector} ...`);
 
@@ -179,25 +180,30 @@ export async function clearAndType(
       (document.querySelector(sel) as HTMLElement | null)?.click();
     }, selector);
   });
-  await sleep(80);
   await jsSet("");
-  await sleep(80);
 
-  // Type the value character by character. delay:80 gives React's reducer
-  // time to process each keypress without dropping the trailing character.
-  await page.type(selector, value, { delay: 80 });
-  // Wait long enough for React's onChange to flush before we verify.
-  await sleep(400);
+  if (humanType) {
+    // Legacy keystroke path — only for the rare field that needs real
+    // keydown/keyup (e.g. keystroke-triggered autocomplete). Slow (~80ms/char).
+    await sleep(80);
+    await page.type(selector, value, { delay: 80 });
+    await sleep(400);
+    await jsSet(value);
+    await sleep(150);
+  } else {
+    // Fast path (default): write the value through the native value setter +
+    // a bubbling `input` event — exactly what Flipkart's React-controlled
+    // inputs consume. The old char-by-char page.type(delay:80) pass was
+    // redundant with this (jsSet was always the authoritative set below) and
+    // cost ~80ms/char plus ~700ms of fixed sleeps per field — the single
+    // biggest source of slow address entry.
+    await jsSet(value);
+    await sleep(30);
+  }
 
-  // ALWAYS reapply via the native setter. This ensures the DOM value is
-  // exactly `value` even if Puppeteer's keystrokes triggered an autocomplete
-  // selection, an onBlur trim, or a controlled-state revert. Idempotent —
-  // when the typed value already matches, this just re-fires the input event.
-  await jsSet(value);
-  await sleep(150);
-
-  // Verify; retry the JS set up to 2 more times if React still hasn't
-  // accepted (e.g. onChange handler aggressively normalises).
+  // Verify; reapply via the native setter up to 2 more times if React
+  // normalised the value away (rare). The input event is processed
+  // synchronously by React's reducer, so short sleeps suffice.
   for (let attempt = 1; attempt <= 3; attempt++) {
     const actualValue = await page.evaluate((sel: string) => {
       const el = document.querySelector(sel) as HTMLInputElement | HTMLTextAreaElement | null;
@@ -212,7 +218,7 @@ export async function clearAndType(
       `Value mismatch on ${label || selector} (attempt ${attempt}/3): expected "${displayVal}" (${value.length} chars), got "${displayActual}" (${actualValue.length} chars). Reapplying via native setter...`
     );
     await jsSet(value);
-    await sleep(300);
+    await sleep(humanType ? 300 : 50);
   }
 
   // Final sanity check — log if we still couldn't get the right value so

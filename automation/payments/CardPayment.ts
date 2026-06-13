@@ -149,6 +149,100 @@ export class CardPayment extends BasePayment {
   //   input[placeholder="MM / YY"] → <input class="wZSAY0" placeholder="MM / YY" autocomplete="cc-exp" type="text">
   //   #cvv-input         → <input id="cvv-input" class="KgilpP" placeholder="CVV" type="password">
 
+  /**
+   * Read the state of Flipkart's primary action button on the payment page.
+   *   "payable"     → text is "Pay ₹<amount>" (address attached, ready to pay)
+   *   "add-address" → text is "Add address and pay" (no delivery address)
+   *   "absent"      → no recognisable primary button yet (still rendering, or
+   *                   a checkout layout that shows card fields directly)
+   * The rupee amount is variable and is matched as a pattern, never compared
+   * to a specific value.
+   */
+  private async readPayButtonState(): Promise<"payable" | "add-address" | "absent"> {
+    try {
+      return await this.page.evaluate(() => {
+        const norm = (t: string) => (t || "").replace(/\s+/g, " ").trim();
+        const els = Array.from(
+          document.querySelectorAll("button, a[role='button'], div[role='button']")
+        );
+        const texts = els
+          .map((b) => norm((b as HTMLElement).innerText || b.textContent || ""))
+          .filter(Boolean);
+
+        // A real "Pay ₹<amount>" button wins over an "Add address" button if
+        // both somehow exist.
+        for (const text of texts) {
+          const low = text.toLowerCase();
+          if (low.includes("add address")) continue;
+          if (/^pay\b/.test(low) && /₹\s*[\d,]/.test(text)) return "payable";
+        }
+        for (const text of texts) {
+          const low = text.toLowerCase();
+          if (low.includes("add address") && low.includes("pay")) return "add-address";
+        }
+        return "absent";
+      });
+    } catch {
+      // Page in transition / frame detached — treat as not-yet-rendered.
+      return "absent";
+    }
+  }
+
+  /**
+   * Gate the card flow on the primary pay button. Refresh-and-recheck until the
+   * button shows "Pay ₹<amount>" (address attached). If it is stuck on
+   * "Add address and pay" after `maxRefresh` reloads, throw so the iteration
+   * fails cleanly instead of typing card details into an order with no address.
+   */
+  private async waitForPayableButton(maxRefresh = 5): Promise<void> {
+    if (this.platform !== "flipkart") return;
+
+    for (let attempt = 0; attempt <= maxRefresh; attempt++) {
+      // Poll up to ~12s for the button to render in SOME state.
+      let state: "payable" | "add-address" | "absent" = "absent";
+      for (let i = 0; i < 24; i++) {
+        state = await this.readPayButtonState();
+        if (state !== "absent") break;
+        await sleep(500);
+      }
+
+      if (state === "payable") {
+        console.log("[FlipkartCard] Primary button shows 'Pay ₹<amount>' — address attached, proceeding to card entry");
+        return;
+      }
+
+      if (state === "absent") {
+        // No "Pay ₹" gateway button visible. If the card fields are already
+        // on the page, this is a direct-entry checkout layout — proceed rather
+        // than refresh (refreshing would wipe a half-filled form).
+        const cardFieldsPresent = await this.page.evaluate(
+          () => !!document.querySelector("#cc-input") || !!document.querySelector("#cvv-input")
+        ).catch(() => false);
+        if (cardFieldsPresent) {
+          console.log("[FlipkartCard] No 'Pay ₹' button but card fields present — proceeding to card entry");
+          return;
+        }
+      }
+
+      // Either "add-address" or "absent without card fields" → refresh & recheck.
+      if (attempt === maxRefresh) break;
+      console.log(
+        `[FlipkartCard] Button state="${state}" (need 'Pay ₹<amount>') — refreshing page (refresh ${attempt + 1}/${maxRefresh})`
+      );
+      try {
+        await this.page.reload({ waitUntil: "domcontentloaded" });
+      } catch (err) {
+        console.log(`[FlipkartCard] Reload error: ${(err as Error).message}`);
+      }
+      await sleep(2500);
+    }
+
+    throw new Error(
+      "Payment page never became payable — primary button stuck on 'Add address and pay' " +
+        `(no delivery address attached) after ${maxRefresh} refreshes.`
+    );
+  }
+
   private async flipkartFillCard(details: CardDetails): Promise<void> {
     const startUrl = this.page.url();
     console.log(`[FlipkartCard] Payment flow starting. URL: ${startUrl}`);
@@ -199,10 +293,69 @@ export class CardPayment extends BasePayment {
       }
     }
 
-    // Dismiss any overlay with Escape
-    await this.page.keyboard.press("Escape").catch(() => {});
-    await sleep(200);
+    // ── Pre-emptive settle + refresh ──
+    // On first reaching the payment page, briefly wait then reload ONCE before
+    // entering card details. Flipkart sometimes renders the order with the
+    // delivery address not yet attached ("Add address and pay"); a fresh load
+    // attaches it. (Requested behaviour: wait ~0.5–1s, refresh, then enter.)
+    await sleep(750);
+    try {
+      await this.page.reload({ waitUntil: "domcontentloaded" });
+      await sleep(1500);
+    } catch (err) {
+      console.log(`[FlipkartCard] Pre-emptive reload error: ${(err as Error).message}`);
+    }
 
+    // ── Fill loop with post-entry recheck ──
+    // Each pass: (1) refresh-until-payable so the primary button reads
+    // "Pay ₹<amount>", (2) fill the card fields, (3) re-check the button.
+    // Entering card details can itself re-trigger an "Add address and pay"
+    // state — if it does, refresh and re-enter. Loop until the button is no
+    // longer "Add address and pay". The amount is variable and never asserted.
+    const maxFillAttempts = 4;
+    for (let attempt = 1; attempt <= maxFillAttempts; attempt++) {
+      // Refresh-until-payable (handles "Add address and pay" BEFORE entry).
+      await this.waitForPayableButton();
+
+      // Dismiss any overlay with Escape.
+      await this.page.keyboard.press("Escape").catch(() => {});
+      await sleep(200);
+
+      // Wait for + fill the card fields (re-renders fresh after any reload).
+      await this.fillCardFieldsOnce(details);
+
+      // Post-entry recheck: ONLY "Add address and pay" forces a refresh +
+      // re-entry. "payable" → ready; "absent" → this layout has no gateway
+      // "Pay ₹" button visible yet (confirm step handles it) → proceed.
+      const state = await this.readPayButtonState();
+      if (state !== "add-address") {
+        console.log(`[FlipkartCard] Card details entered; primary button state="${state}" — proceeding`);
+        return;
+      }
+
+      if (attempt === maxFillAttempts) break;
+      console.log(
+        `[FlipkartCard] Button reverted to 'Add address and pay' after card entry — refreshing and re-entering (attempt ${attempt + 1}/${maxFillAttempts})`
+      );
+      try {
+        await this.page.reload({ waitUntil: "domcontentloaded" });
+        await sleep(2000);
+      } catch (err) {
+        console.log(`[FlipkartCard] Reload error: ${(err as Error).message}`);
+      }
+    }
+
+    throw new Error(
+      "Payment page kept showing 'Add address and pay' even after entering card details across multiple refreshes."
+    );
+  }
+
+  /**
+   * Wait for Flipkart's card fields to render, then fill card number, expiry
+   * and CVV. Throws if the fields never appear. Re-runnable: after a page
+   * reload the card section re-renders, so the fill loop can call this again.
+   */
+  private async fillCardFieldsOnce(details: CardDetails): Promise<void> {
     // Wait for card fields to appear in DOM — poll without refreshing
     console.log("[FlipkartCard] Waiting for card fields to render...");
     let fieldsFound = false;
@@ -291,9 +444,20 @@ export class CardPayment extends BasePayment {
       el.select();
     }, selector);
 
-    // Type — page.type fires real keydown/keyup events React picks up naturally
-    await this.page.type(selector, value, { delay: 30 });
-    await sleep(100);
+    // Settle briefly after focusing — like a human pausing before typing.
+    await sleep(120 + Math.floor(Math.random() * 120));
+
+    // Type the value at a HUMAN pace: char-by-char with a randomised
+    // inter-keystroke gap. Filling the card fields (CVV especially) in a fast
+    // burst can make Flipkart's payment page re-render to "Add address and
+    // pay"; pacing the keystrokes like a real person avoids that. Each
+    // page.type still fires real keydown/keypress/input/keyup events.
+    for (const ch of value) {
+      await this.page.type(selector, ch, { delay: 0 });
+      await sleep(90 + Math.floor(Math.random() * 110)); // ~90–200ms per char
+    }
+    // Human pause after finishing the field before moving to the next one.
+    await sleep(180 + Math.floor(Math.random() * 160));
 
     // Verify
     const entered = await this.page.evaluate(

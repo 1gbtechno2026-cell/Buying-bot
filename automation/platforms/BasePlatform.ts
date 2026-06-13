@@ -68,6 +68,11 @@ export abstract class BasePlatform {
     this.productUrl = url;
   }
 
+  /** Rebind to a fresh page (used by the orchestrator's tab-crash recovery). */
+  setPage(page: Page): void {
+    this.page = page;
+  }
+
   abstract navigateToProduct(): Promise<void>;
   abstract clickBuyNow(): Promise<void>;
   abstract setQuantity(qty: number): Promise<void>;

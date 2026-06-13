@@ -69,6 +69,7 @@ export interface JobConfig {
   amazonAccounts?: { email: string; password: string }[]; // decrypted Amazon credentials for rotation
   address?: AddressDetails; // delivery address with GST for checkout verification
   maxConcurrentTabs?: number; // max simultaneous browser tabs for RTGS multi-tab mode (default: 1)
+  repeatOrders?: number; // multi-product/cart jobs: how many times to place the whole-cart order (default: 1). For single-product jobs the count comes from totalQuantity/perOrderQuantity instead.
   giftCardInventoryId?: string; // gift card inventory for code rotation
   instaDdrAccounts?: InstaDdrAccount[]; // InstaDDR email identities for Flipkart login
   instaDdrUrl?: string; // (legacy) InstaDDR portal URL — only used when gmailAddress is absent

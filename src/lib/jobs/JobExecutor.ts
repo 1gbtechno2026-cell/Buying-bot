@@ -46,7 +46,26 @@ export class JobExecutor extends EventEmitter {
     const chromeProfile = job.chromeProfileId as unknown as {
       directoryName: string;
       gmailAddress?: string | null;
+      isLoggedIn?: boolean;
     };
+
+    // Pre-flight: never spawn a runner that is guaranteed to fail. A Flipkart
+    // job authenticates via a pre-logged-in profile OR account/InstaDDR
+    // rotation. Without either it runs logged-out and every iteration bounces
+    // to the login page. (Mirrors the create-route gate — also catches jobs
+    // created before that gate existed or whose login flag is false.) The
+    // start route catches this throw, reverts the job to "pending", and shows
+    // the message to the user instead of a silent immediate failure.
+    if (job.platform === "flipkart") {
+      const usingLoginRotation =
+        (job.accountIds?.length ?? 0) > 0 ||
+        (((job as unknown as { instaDdrAccountIds?: unknown[] }).instaDdrAccountIds?.length) ?? 0) > 0;
+      if (!usingLoginRotation && !chromeProfile.isLoggedIn) {
+        throw new Error(
+          "Chrome profile is not logged in to Flipkart. Open Profiles → Setup Login (and Connect Gmail) before running, or use account rotation with an OTP source."
+        );
+      }
+    }
     // Build products array: use job.products if available, else fall back to single productUrl
     const products =
       job.products && job.products.length > 0
@@ -226,6 +245,7 @@ export class JobExecutor extends EventEmitter {
       ...(amazonAccounts && amazonAccounts.length > 0 ? { amazonAccounts } : {}),
       ...(address ? { address } : {}),
       ...(job.maxConcurrentTabs > 1 ? { maxConcurrentTabs: job.maxConcurrentTabs } : {}),
+      repeatOrders: job.repeatOrders ?? 1,
       ...(instaDdrAccounts && instaDdrAccounts.length > 0 ? { instaDdrAccounts } : {}),
       ...(chromeProfile.gmailAddress ? { gmailAddress: chromeProfile.gmailAddress } : {}),
     };
@@ -261,8 +281,18 @@ export class JobExecutor extends EventEmitter {
       ...(spawnEnv ? { env: spawnEnv } : {}),
     });
 
-    // Update job status
-    const totalIterations = Math.ceil(job.totalQuantity / job.perOrderQuantity);
+    // Update job status. Iteration count mirrors BatchOrchestrator.run():
+    // multi-product / Amazon-cart jobs buy the whole cart per order, so the
+    // count is repeatOrders (default 1); single-product jobs split the total
+    // quantity into perOrderQuantity-sized orders.
+    const isMultiUrl =
+      products.length > 1 ||
+      (job.platform === "amazon" &&
+        (products.some((p: { quantity: number }) => p.quantity > 1) ||
+          job.perOrderQuantity > 1));
+    const totalIterations = isMultiUrl
+      ? Math.max(1, job.repeatOrders ?? 1)
+      : Math.ceil(job.totalQuantity / job.perOrderQuantity);
     await Job.updateOne(
       { _id: this.jobId },
       {

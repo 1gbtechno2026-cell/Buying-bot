@@ -33,6 +33,7 @@ const createJobSchema = z.object({
   addressIds: z.array(z.string()).optional(),
   checkoutPincode: z.string().optional(),
   maxConcurrentTabs: z.number().int().positive().optional(),
+  repeatOrders: z.number().int().positive().optional(), // multi-product: repeat the whole-cart order N times (default 1)
   giftCardInventoryId: z.string().optional(),
   instaDdrAccountIds: z.array(z.string()).optional(),
 });
@@ -129,6 +130,48 @@ export async function POST(req: NextRequest) {
         { error: "Chrome profile not found or doesn't belong to you" },
         { status: 400 }
       );
+    }
+
+    // ── Pre-flight authentication gate (Flipkart) ──
+    // A Flipkart job can only reach checkout if it is authenticated. There are
+    // two ways: (1) the selected Chrome profile is already logged in (manual
+    // "Setup Login"), or (2) the job uses account / InstaDDR rotation which
+    // performs a fresh login each run. With NEITHER, the bot runs logged-out
+    // and every iteration bounces to the Flipkart login page — the job "just
+    // ends". This is exactly why a freshly-created (empty) non-admin profile
+    // fails while the admin's hand-prepared profile works. Fail fast with a
+    // clear, actionable message instead of a confusing mid-run failure.
+    if (data.platform === "flipkart") {
+      const usingLoginRotation =
+        (data.accountIds?.length ?? 0) > 0 ||
+        (data.instaDdrAccountIds?.length ?? 0) > 0;
+
+      if (!usingLoginRotation && !profile.isLoggedIn) {
+        return NextResponse.json(
+          {
+            error:
+              "This Chrome profile is not logged in to Flipkart. Open Profiles → Setup Login (and Connect Gmail for OTP) before running this job, or add Flipkart account(s) + an InstaDDR/Gmail OTP source for auto-login.",
+          },
+          { status: 400 }
+        );
+      }
+
+      // Account rotation logs in fresh each run, which requires an OTP source.
+      // If accounts are selected but the profile has no linked Gmail and no
+      // InstaDDR group is chosen, OTP fetching fails on every iteration.
+      if (
+        (data.accountIds?.length ?? 0) > 0 &&
+        (data.instaDdrAccountIds?.length ?? 0) === 0 &&
+        !profile.gmailAddress
+      ) {
+        return NextResponse.json(
+          {
+            error:
+              "Account rotation needs an OTP source. Connect Gmail to this profile (Profiles → Connect Gmail) or add an InstaDDR account group.",
+          },
+          { status: 400 }
+        );
+      }
     }
 
     // Validate card rotation: if cardIds provided, verify they belong to user
@@ -286,7 +329,20 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    const totalIterations = Math.ceil(totalQuantity / data.perOrderQuantity);
+    // Iteration count must match what each iteration actually buys.
+    //  • Multi-product (or Amazon cart) jobs buy the WHOLE product list in one
+    //    order, so the count is the number of times to repeat that order
+    //    (repeatOrders, default 1) — NOT ceil(sumQty/perOrder), which would
+    //    re-place the entire cart once per unit and massively over-order.
+    //  • Single-product jobs split totalQuantity into perOrderQuantity-sized
+    //    orders as before.
+    const isMultiUrl =
+      data.products.length > 1 ||
+      (data.platform === "amazon" &&
+        (data.products.some((p) => p.quantity > 1) || data.perOrderQuantity > 1));
+    const totalIterations = isMultiUrl
+      ? Math.max(1, data.repeatOrders ?? 1)
+      : Math.ceil(totalQuantity / data.perOrderQuantity);
 
     console.log("[CreateJob] Storing with addressIds:", addressIdsToStore, "checkoutPincode:", data.checkoutPincode);
 
@@ -309,6 +365,7 @@ export async function POST(req: NextRequest) {
       addressIds: addressIdsToStore,
       checkoutPincode: data.checkoutPincode || "",
       maxConcurrentTabs: data.maxConcurrentTabs || 1,
+      repeatOrders: data.repeatOrders ?? 1,
       giftCardInventoryId,
       instaDdrAccountIds: instaDdrAccountIds.length > 0 ? instaDdrAccountIds : undefined,
       status: "pending",

@@ -185,15 +185,21 @@ export class BatchOrchestrator {
   }
 
   async run(): Promise<{ completed: number; failed: number }> {
-    let totalIterations = Math.ceil(
-      this.config.totalQuantity / this.config.perOrderQuantity
-    );
+    // A multi-URL / Amazon-cart iteration buys the ENTIRE product list in one
+    // order (addAllProductsAndCheckout adds every product at its quantity), so
+    // the loop must run once per desired order — repeatOrders (default 1) — NOT
+    // ceil(totalQuantity / perOrderQuantity), which re-placed the whole cart
+    // once per unit and grossly over-ordered (e.g. 2 products × qty 3 → 36).
+    // Single-product jobs still split totalQuantity into perOrderQuantity orders.
+    let totalIterations = this.isMultiUrl
+      ? Math.max(1, this.config.repeatOrders ?? 1)
+      : Math.ceil(this.config.totalQuantity / this.config.perOrderQuantity);
 
     sendMessage({
       type: "log",
       level: "info",
       message: this.isMultiUrl
-        ? `Starting multi-URL batch: ${totalIterations} iterations, ${this.config.products.length} products`
+        ? `Starting multi-URL batch: ${totalIterations} order(s) × ${this.config.products.length} product(s) per order (repeatOrders=${this.config.repeatOrders ?? 1})`
         : `Starting batch: ${totalIterations} iterations (${this.config.totalQuantity} total qty, ${this.config.perOrderQuantity} per order)`,
     });
 
@@ -631,20 +637,30 @@ export class BatchOrchestrator {
             sendMessage({
               type: "log",
               level: "warn",
-              message: "Page unresponsive after reset, attempting recovery...",
+              message: "Page closed/unresponsive after reset, attempting recovery...",
             });
-            // Try to recover by opening a new page in the browser
+            // Recover so a closed tab does NOT stop the remaining iterations:
+            // reattach to any still-open tab, else open a fresh one. Crucially,
+            // rebind BOTH the platform and the payment strategy to the new page
+            // (they hold their own reference from construction) — otherwise the
+            // next iteration would keep driving the dead page and fail forever.
             try {
               const browser = this.page.browser();
               const pages = await browser.pages();
-              if (pages.length > 0) {
-                this.page = pages[0];
-              }
+              const recovered = pages.length > 0 ? pages[0] : await browser.newPage();
+              this.page = recovered;
+              this.platform.setPage(recovered);
+              this.payment.setPage(recovered);
+              sendMessage({
+                type: "log",
+                level: "info",
+                message: `Recovered onto a ${pages.length > 0 ? "still-open" : "fresh"} tab — continuing with the next iteration`,
+              });
             } catch {
               sendMessage({
                 type: "log",
                 level: "error",
-                message: "Browser recovery failed, stopping iterations",
+                message: "Browser process is gone — cannot recover, stopping iterations",
               });
               break;
             }

@@ -1420,30 +1420,34 @@ export class FlipkartPlatform extends BasePlatform {
       message: `[login] Step 1/6: checking session for ${email.substring(0, 3)}***`,
     });
 
-    // Step 1: Check if already logged in — if so, log out first.
-    // isLoggedIn() catches errors internally and returns false on context loss,
-    // so this never throws.
+    // Step 1: ALWAYS log out before logging in — do NOT gate this on
+    // isLoggedIn(). That detector false-negatives on the order-confirmation
+    // page (none of "my account"/"my orders"/"logout"/"sign out" are present),
+    // so on iteration N+1 the stale session survived, "/account/login"
+    // redirected to the account page, and "Could not find Request OTP button"
+    // fired. A forced logout clears Flipkart cookies authoritatively (Gmail and
+    // other origins are untouched), guaranteeing a fresh login form every time.
     let alreadyLoggedIn = false;
     try {
       alreadyLoggedIn = await this.isLoggedIn();
     } catch {
       alreadyLoggedIn = false;
     }
-    if (alreadyLoggedIn) {
+    sendMessage({
+      type: "log",
+      level: "info",
+      message: alreadyLoggedIn
+        ? "[login] previous session detected — logging out first"
+        : "[login] forcing logout to guarantee a fresh login page",
+    });
+    try {
+      await this.logout();
+    } catch (err) {
       sendMessage({
         type: "log",
-        level: "info",
-        message: "[login] previous session detected — logging out first",
+        level: "warn",
+        message: `[login] logout failed (continuing): ${(err as Error).message}`,
       });
-      try {
-        await this.logout();
-      } catch (err) {
-        sendMessage({
-          type: "log",
-          level: "warn",
-          message: `[login] logout failed (continuing): ${(err as Error).message}`,
-        });
-      }
     }
 
     // Step 2: Navigate to Flipkart login page. Extra settle so the SPA's
