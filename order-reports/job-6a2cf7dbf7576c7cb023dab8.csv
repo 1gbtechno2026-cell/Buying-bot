@@ -1,2 +1,4 @@
 ITERATION	STATUS	ACCOUNT EMAIL	MODEL	COLOUR	QTY	PIN CODE	AMOUNT	PER PC	ORDER ID	ORDER DATE	GST NAME	NOTE
 1	failed	aryanpatel.dev11@gmail.com	Apple Iphone 17 Pro Silver 256 Gb	silver	2	122017	238339	119170		13 Jun	PERFECT TELELINKS PRIVATE LIMITED	payment verification timed out
+2	failed	aryanpatel.dev11@gmail.com	Apple Iphone 17 Pro Silver 256 Gb	silver	2	122017	238339	119170		13 Jun	PERFECT TELELINKS PRIVATE LIMITED	payment verification timed out
+3	failed	aryanpatel.dev11@gmail.com	Apple Iphone 17 Pro Silver 256 Gb	silver	2	122017				13 Jun	PERFECT TELELINKS PRIVATE LIMITED	Page failed to load after 3 attempts (https://www.flipkart.com/account/login?ret=/): Attempted to use detached Frame 'E34FC156E9977AF00433F9E6A5B0BED4'.
